@@ -1,0 +1,34 @@
+version: "3.8"
+
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - APP_MODE=mock
+      - DATABASE_URL=postgres://postgres:shopee_secret@postgres:5432/shopee_affiliate
+      - SHOPEE_PARTNER_ID=${SHOPEE_PARTNER_ID:-}
+      - SHOPEE_PARTNER_KEY=${SHOPEE_PARTNER_KEY:-}
+      - SHOPEE_REGION=ID
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: shopee_secret
+      POSTGRES_DB: shopee_affiliate
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

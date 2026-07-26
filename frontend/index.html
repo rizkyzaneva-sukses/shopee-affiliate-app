@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="id" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shopee Affiliate Manager</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root { --bg:#0b1120; --card:#111827; --border:#1e293b; --orange:#f97316; --orange-dim:rgba(249,115,22,.15); }
+    *{box-sizing:border-box}
+    body{font-family:Inter,system-ui,sans-serif;background:var(--bg);color:#e2e8f0;margin:0;min-height:100vh}
+    .sidebar{width:240px;background:#0f172a;border-right:1px solid var(--border);display:flex;flex-direction:column}
+    .nav-item{display:flex;align-items:center;gap:12px;padding:10px 16px;border-radius:8px;color:#94a3b8;font-size:14px;font-weight:500;transition:.15s;cursor:pointer;text-decoration:none}
+    .nav-item:hover{background:#1e293b;color:#e2e8f0}
+    .nav-item.nav-active{background:var(--orange-dim);color:#fb923c}
+    .nav-item i{width:18px;text-align:center}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:12px}
+    .kpi-icon{width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px}
+    .table-row{transition:background .1s}.table-row:hover{background:rgba(30,41,59,.6)}
+    .td-rank{color:#64748b;width:40px}
+    .avatar{width:36px;height:36px;border-radius:50%;background:var(--orange-dim);color:#fb923c;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+    .badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:500}
+    .badge-live{background:rgba(239,68,68,.15);color:#f87171}
+    .badge-video{background:rgba(168,85,247,.15);color:#c084fc}
+    .badge-social{background:rgba(59,130,246,.15);color:#60a5fa}
+    .status-badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:500}
+    .status-active{background:rgba(16,185,129,.15);color:#34d399}
+    .status-warning{background:rgba(245,158,11,.15);color:#fbbf24}
+    .status-inactive{background:rgba(100,116,139,.2);color:#94a3b8}
+    .top-item{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:8px;margin-bottom:6px}
+    .rank-num{width:24px;height:24px;border-radius:50%;background:#1e293b;color:#94a3b8;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+    .rank-gold{background:rgba(251,191,36,.1)}.rank-gold .rank-num{background:#f59e0b;color:#0f172a}
+    .rank-silver{background:rgba(148,163,184,.08)}.rank-silver .rank-num{background:#64748b;color:#0f172a}
+    .rank-bronze{background:rgba(180,83,9,.1)}.rank-bronze .rank-num{background:#b45309;color:#fef3c7}
+    .campaign-card{background:#0f172a;border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+    .shop-item{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:8px;background:#0f172a;border:1px solid var(--border);margin-bottom:8px}
+    .select,.input{background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:8px;padding:7px 12px;font-size:13px;outline:none}
+    .select:focus,.input:focus{border-color:#f97316}
+    .select option{background:#0f172a}
+    .btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;border:none;transition:.15s}
+    .btn-primary{background:#ea580c;color:#fff}.btn-primary:hover{background:#c2410c}.btn-primary:disabled{opacity:.6;cursor:not-allowed}
+    .btn-ghost{background:transparent;color:#94a3b8;border:1px solid #334155}.btn-ghost:hover{background:#1e293b;color:#e2e8f0}
+    .mode-badge{font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px}
+    .mode-mock{background:rgba(100,116,139,.3);color:#94a3b8}
+    .mode-live{background:rgba(16,185,129,.2);color:#34d399}
+    .toast{position:fixed;bottom:24px;right:24px;background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:12px 18px;border-radius:10px;font-size:13px;display:flex;align-items:center;gap:10px;z-index:100;opacity:0;transform:translateY(12px);transition:.25s;box-shadow:0 8px 30px rgba(0,0,0,.4)}
+    .toast.show{opacity:1;transform:translateY(0)}
+    .toast-success i{color:#34d399}.toast-info i{color:#60a5fa}
+    ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-thumb{background:#334155;border-radius:3px}
+    @media(max-width:768px){.sidebar{display:none}.main-wrap{margin-left:0!important}}
+  </style>
+</head>
+<body>
+<div class="flex min-h-screen">
+  <aside class="sidebar fixed top-0 left-0 h-full z-20">
+    <div class="p-5 flex items-center gap-3 border-b border-slate-800">
+      <div class="w-9 h-9 rounded-lg bg-orange-500 flex items-center justify-center"><i class="fas fa-handshake text-white text-sm"></i></div>
+      <div>
+        <p class="font-semibold text-sm text-slate-100 leading-tight">Affiliate Manager</p>
+        <p class="text-[11px] text-slate-500">Shopee AMS</p>
+      </div>
+    </div>
+    <nav class="flex-1 p-3 space-y-1 mt-2">
+      <a href="#" class="nav-item nav-active" data-tab="dashboard"><i class="fas fa-chart-pie"></i> Dashboard</a>
+      <a href="#" class="nav-item" data-tab="affiliates"><i class="fas fa-users"></i> Afiliator</a>
+      <a href="#" class="nav-item" data-tab="campaigns"><i class="fas fa-bullhorn"></i> Campaign</a>
+      <a href="#" class="nav-item" data-tab="shops"><i class="fas fa-store"></i> Toko Saya</a>
+    </nav>
+    <div class="p-4 border-t border-slate-800">
+      <div class="flex items-center justify-between mb-2">
+        <span class="text-[11px] text-slate-500">Mode</span>
+        <span id="modeBadge" class="mode-badge mode-mock">MOCK DATA</span>
+      </div>
+      <p class="text-[10px] text-slate-600 leading-relaxed">Set <code class="text-slate-500">APP_MODE=live</code> di environment setelah isi kredensial Shopee.</p>
+    </div>
+  </aside>
+
+  <div class="flex-1 main-wrap" style="margin-left:240px">
+    <header class="sticky top-0 z-10 bg-[#0b1120]/95 backdrop-blur border-b border-slate-800">
+      <div class="px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 class="text-base font-semibold text-slate-100">Dashboard Afiliasi</h1>
+          <p class="text-xs text-slate-500">Monitoring performa multi-toko</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <select id="shopSelect" class="select"><option value="all">Semua Toko</option></select>
+          <select id="periodSelect" class="select">
+            <option value="Last7d">7 Hari</option>
+            <option value="Last30d" selected>30 Hari</option>
+            <option value="Month">Bulan Ini</option>
+          </select>
+          <select id="channelSelect" class="select">
+            <option value="all">Semua Channel</option>
+            <option value="social">Social Media</option>
+            <option value="video">Shopee Video</option>
+            <option value="live">Live Streaming</option>
+          </select>
+          <button id="btnRefresh" onclick="refreshAll()" class="btn btn-primary"><i class="fas fa-sync-alt text-xs"></i> Refresh</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Dashboard -->
+    <div data-panel="dashboard" class="p-5 space-y-5">
+      <div class="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+        <div class="card p-4"><div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total GMV</span><div class="kpi-icon" style="background:rgba(16,185,129,.15);color:#34d399"><i class="fas fa-money-bill-wave"></i></div></div><p class="text-xl font-bold text-slate-100" id="kpiGmv">—</p></div>
+        <div class="card p-4"><div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total Order</span><div class="kpi-icon" style="background:rgba(59,130,246,.15);color:#60a5fa"><i class="fas fa-shopping-bag"></i></div></div><p class="text-xl font-bold text-slate-100" id="kpiOrder">—</p></div>
+        <div class="card p-4"><div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Est. Komisi</span><div class="kpi-icon" style="background:var(--orange-dim);color:#fb923c"><i class="fas fa-percentage"></i></div></div><p class="text-xl font-bold text-slate-100" id="kpiCommission">—</p></div>
+        <div class="card p-4"><div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Avg ROI</span><div class="kpi-icon" style="background:rgba(168,85,247,.15);color:#c084fc"><i class="fas fa-chart-line"></i></div></div><p class="text-xl font-bold text-slate-100" id="kpiRoi">—</p></div>
+        <div class="card p-4"><div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total Klik</span><div class="kpi-icon" style="background:rgba(14,165,233,.15);color:#38bdf8"><i class="fas fa-mouse-pointer"></i></div></div><p class="text-xl font-bold text-slate-100" id="kpiClicks">—</p></div>
+        <div class="card p-4"><div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Afiliator Aktif</span><div class="kpi-icon" style="background:rgba(34,197,94,.15);color:#4ade80"><i class="fas fa-user-check"></i></div></div><p class="text-xl font-bold text-slate-100" id="kpiActive">—</p></div>
+      </div>
+
+      <div class="grid lg:grid-cols-3 gap-4">
+        <div class="card p-4 lg:col-span-2">
+          <div class="flex items-center justify-between mb-3"><h3 class="text-sm font-semibold text-slate-200">Tren GMV Afiliasi</h3><span class="text-[10px] text-slate-600">30 hari</span></div>
+          <div style="height:240px"><canvas id="gmvChart"></canvas></div>
+        </div>
+        <div class="card p-4"><h3 class="text-sm font-semibold text-slate-200 mb-3">Top 5 Afiliator</h3><div id="topAffiliates"></div></div>
+      </div>
+
+      <div class="card overflow-hidden">
+        <div class="px-4 py-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+          <h3 class="text-sm font-semibold text-slate-200">Daftar Afiliator</h3>
+          <div class="flex items-center gap-2">
+            <input id="searchInput" type="text" placeholder="Cari nama / username..." class="input w-48" />
+            <span class="text-xs text-slate-500" id="affiliateCount">—</span>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-left text-xs text-slate-500 border-b border-slate-800">
+                <th class="px-4 py-2.5 font-medium">#</th>
+                <th class="px-4 py-2.5 font-medium">Afiliator</th>
+                <th class="px-4 py-2.5 font-medium">Channel</th>
+                <th class="px-4 py-2.5 font-medium text-right">GMV</th>
+                <th class="px-4 py-2.5 font-medium text-right">Order</th>
+                <th class="px-4 py-2.5 font-medium text-right">Klik</th>
+                <th class="px-4 py-2.5 font-medium text-right">Komisi</th>
+                <th class="px-4 py-2.5 font-medium text-right">ROI</th>
+                <th class="px-4 py-2.5 font-medium text-center">Status</th>
+              </tr>
+            </thead>
+            <tbody id="affiliateTable"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Affiliates -->
+    <div data-panel="affiliates" class="p-5 hidden">
+      <div class="card p-6 text-center text-slate-500 text-sm">
+        Gunakan filter di header + tabel di Dashboard. Data yang sama.
+      </div>
+    </div>
+
+    <!-- Campaigns -->
+    <div data-panel="campaigns" class="p-5 hidden space-y-4">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-semibold text-slate-200">Campaign</h3>
+        <button class="btn btn-primary" onclick="showToast('Siap dihubungkan ke v2.ams.create_new_targeted_campaign','info')"><i class="fas fa-plus text-xs"></i> Buat Campaign</button>
+      </div>
+      <div id="campaignList" class="grid sm:grid-cols-2 gap-3"></div>
+    </div>
+
+    <!-- Shops -->
+    <div data-panel="shops" class="p-5 hidden space-y-4">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-semibold text-slate-200">Toko Terhubung</h3>
+        <button class="btn btn-primary" onclick="showToast('Authorization flow: gunakan Shopee OAuth lalu POST /api/shops','info')"><i class="fas fa-link text-xs"></i> Hubungkan Toko</button>
+      </div>
+      <div id="shopList"></div>
+      <div class="card p-4 text-xs text-slate-500 leading-relaxed">
+        <i class="fas fa-info-circle text-orange-400 mr-1"></i>
+        Token disimpan di PostgreSQL. Sync menarik data dari <code class="text-slate-400">v2.ams.get_affiliate_performance</code>.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="js/config.js"></script>
+<script src="js/mock-data.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

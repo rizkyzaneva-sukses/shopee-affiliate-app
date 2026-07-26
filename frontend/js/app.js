@@ -1,0 +1,357 @@
+/**
+ * Shopee Affiliate Manager - Frontend
+ * Tries backend API first, falls back to mock data
+ */
+
+const API = window.APP_CONFIG?.API_BASE || '';
+
+let state = {
+  shop: 'all',
+  channel: 'all',
+  period: 'Last30d',
+  search: '',
+  tab: 'dashboard',
+  shops: [],
+  affiliates: [],
+  campaigns: [],
+  source: 'mock',
+};
+
+let gmvChart = null;
+
+// ---------- Helpers ----------
+function formatRupiah(num) {
+  num = Number(num) || 0;
+  if (num >= 1e9) return 'Rp ' + (num / 1e9).toFixed(1).replace('.', ',') + 'M';
+  if (num >= 1e6) return 'Rp ' + (num / 1e6).toFixed(1).replace('.', ',') + 'jt';
+  return 'Rp ' + num.toLocaleString('id-ID');
+}
+function formatNumber(n) { return Number(n || 0).toLocaleString('id-ID'); }
+
+function getChannelBadge(ch) {
+  if (ch === 'Live Streaming') return 'badge-live';
+  if (ch === 'Shopee Video') return 'badge-video';
+  return 'badge-social';
+}
+function getStatusBadge(s) {
+  if (s === 'active') return { cls: 'status-active', text: 'Aktif' };
+  if (s === 'warning') return { cls: 'status-warning', text: 'Perlu Perhatian' };
+  return { cls: 'status-inactive', text: 'Nonaktif' };
+}
+
+async function apiGet(path) {
+  try {
+    const res = await fetch(`${API}${path}`);
+    if (!res.ok) throw new Error(res.statusText);
+    return await res.json();
+  } catch (e) {
+    console.warn('[API]', path, e.message);
+    return null;
+  }
+}
+
+// ---------- Data loading ----------
+async function loadShops() {
+  const res = await apiGet('/api/shops');
+  if (res?.data?.length) {
+    state.shops = res.data;
+    state.source = 'live';
+  } else {
+    state.shops = window.MOCK_SHOPS || [];
+  }
+  renderShopSelect();
+  renderShopList();
+}
+
+async function loadAffiliates() {
+  const params = new URLSearchParams();
+  if (state.shop !== 'all') params.set('shop_id', state.shop);
+  if (state.channel !== 'all') params.set('channel', state.channel);
+  if (state.search) params.set('q', state.search);
+  params.set('period', state.period);
+
+  const res = await apiGet('/api/affiliates?' + params.toString());
+  let data = res?.data || [];
+
+  if (!data.length) {
+    // Fallback mock + client filter
+    data = [...(window.MOCK_AFFILIATES || [])];
+    if (state.shop !== 'all') data = data.filter(a => String(a.shop_id) === String(state.shop));
+    if (state.channel !== 'all') {
+      const map = { social: 'Social Media', video: 'Shopee Video', live: 'Live Streaming' };
+      data = data.filter(a => a.channel === map[state.channel]);
+    }
+    if (state.search) {
+      const q = state.search.toLowerCase();
+      data = data.filter(a => (a.name || '').toLowerCase().includes(q) || (a.username || '').toLowerCase().includes(q));
+    }
+    state.source = 'mock';
+  } else {
+    state.source = res.source || 'live';
+  }
+
+  state.affiliates = data.sort((a, b) => (b.gmv || 0) - (a.gmv || 0));
+  updateKPI();
+  renderTop();
+  renderTable();
+  updateModeBadge();
+}
+
+async function loadCampaigns() {
+  const params = state.shop !== 'all' ? `?shop_id=${state.shop}` : '';
+  const res = await apiGet('/api/campaigns' + params);
+  state.campaigns = res?.data?.length ? res.data : (window.MOCK_CAMPAIGNS || []);
+  renderCampaigns();
+}
+
+// ---------- Render ----------
+function updateModeBadge() {
+  const el = document.getElementById('modeBadge');
+  if (!el) return;
+  el.textContent = state.source === 'live' ? 'LIVE API' : 'MOCK DATA';
+  el.className = 'mode-badge ' + (state.source === 'live' ? 'mode-live' : 'mode-mock');
+}
+
+function updateKPI() {
+  const d = state.affiliates;
+  const gmv = d.reduce((s, a) => s + Number(a.gmv || 0), 0);
+  const orders = d.reduce((s, a) => s + Number(a.orders || 0), 0);
+  const commission = d.reduce((s, a) => s + Number(a.commission || 0), 0);
+  const clicks = d.reduce((s, a) => s + Number(a.clicks || 0), 0);
+  const roi = commission > 0 ? gmv / commission : 0;
+  const active = d.filter(a => a.status === 'active').length;
+
+  document.getElementById('kpiGmv').textContent = formatRupiah(gmv);
+  document.getElementById('kpiOrder').textContent = formatNumber(orders);
+  document.getElementById('kpiCommission').textContent = formatRupiah(commission);
+  document.getElementById('kpiRoi').textContent = roi.toFixed(1) + 'x';
+  document.getElementById('kpiClicks').textContent = formatNumber(clicks);
+  document.getElementById('kpiActive').textContent = active + ' / ' + d.length;
+}
+
+function renderTop() {
+  const el = document.getElementById('topAffiliates');
+  const top = state.affiliates.slice(0, 5);
+  if (!top.length) {
+    el.innerHTML = '<p class="text-slate-500 text-sm text-center py-6">Tidak ada data</p>';
+    return;
+  }
+  el.innerHTML = top.map((a, i) => {
+    const rank = i === 0 ? 'rank-gold' : i === 1 ? 'rank-silver' : i === 2 ? 'rank-bronze' : '';
+    return `
+      <div class="top-item ${rank}">
+        <div class="rank-num">${i + 1}</div>
+        <div class="flex-1 min-w-0">
+          <p class="font-medium text-sm text-slate-100 truncate">${a.name || a.username}</p>
+          <p class="text-xs text-slate-500">@${a.username || '-'}</p>
+        </div>
+        <div class="text-right">
+          <p class="font-semibold text-sm text-orange-400">${formatRupiah(a.gmv)}</p>
+          <p class="text-xs text-slate-500">${a.orders || 0} order</p>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderTable() {
+  const tbody = document.getElementById('affiliateTable');
+  document.getElementById('affiliateCount').textContent = state.affiliates.length + ' afiliator';
+
+  if (!state.affiliates.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="text-center py-10 text-slate-500">Tidak ada afiliator</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = state.affiliates.map((a, i) => {
+    const st = getStatusBadge(a.status || 'active');
+    const initials = (a.name || '??').split(' ').map(w => w[0]).slice(0, 2).join('').toUpperCase();
+    return `
+      <tr class="table-row">
+        <td class="td-rank">${i + 1}</td>
+        <td>
+          <div class="flex items-center gap-3">
+            <div class="avatar">${initials}</div>
+            <div>
+              <p class="font-medium text-slate-100">${a.name || '-'}</p>
+              <p class="text-xs text-slate-500">@${a.username || '-'} · ${a.followers || ''}</p>
+            </div>
+          </div>
+        </td>
+        <td><span class="badge ${getChannelBadge(a.channel)}">${a.channel || '-'}</span></td>
+        <td class="text-right font-medium text-slate-100">${formatRupiah(a.gmv)}</td>
+        <td class="text-right text-slate-300">${formatNumber(a.orders)}</td>
+        <td class="text-right text-slate-300">${formatNumber(a.clicks)}</td>
+        <td class="text-right font-medium text-orange-400">${formatRupiah(a.commission)}</td>
+        <td class="text-right font-semibold text-emerald-400">${Number(a.roi || 0).toFixed(1)}x</td>
+        <td class="text-center">
+          <span class="status-badge ${st.cls}">${st.text}</span>
+          <p class="text-[10px] text-slate-500 mt-0.5">${a.last_active_at || a.last_active || ''}</p>
+        </td>
+      </tr>`;
+  }).join('');
+}
+
+function renderShopSelect() {
+  const sel = document.getElementById('shopSelect');
+  const current = sel.value;
+  sel.innerHTML = `<option value="all">Semua Toko (${state.shops.length})</option>`;
+  state.shops.forEach(s => {
+    sel.innerHTML += `<option value="${s.shop_id}">${s.shop_name || s.shop_id}</option>`;
+  });
+  sel.value = current || 'all';
+}
+
+function renderShopList() {
+  const el = document.getElementById('shopList');
+  if (!el) return;
+  el.innerHTML = state.shops.map(s => `
+    <div class="shop-item ${s.status === 'inactive' ? 'opacity-60' : ''}">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-lg bg-orange-500/20 text-orange-400 flex items-center justify-center text-sm font-bold">
+          ${(s.shop_name || 'S').charAt(0)}
+        </div>
+        <div>
+          <p class="font-medium text-sm text-slate-100">${s.shop_name || s.shop_id}</p>
+          <p class="text-xs text-slate-500">${s.region || '-'} · ${s.status || 'active'}</p>
+        </div>
+      </div>
+      <button class="btn btn-ghost text-xs" onclick="syncShop('${s.shop_id}')">
+        <i class="fas fa-sync-alt"></i> Sync
+      </button>
+    </div>
+  `).join('');
+}
+
+function renderCampaigns() {
+  const el = document.getElementById('campaignList');
+  if (!el) return;
+  el.innerHTML = state.campaigns.map(c => {
+    const st = c.status === 'Ongoing' ? 'status-active' : c.status === 'Upcoming' ? 'status-warning' : 'status-inactive';
+    return `
+      <div class="campaign-card">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <p class="font-medium text-slate-100">${c.name}</p>
+            <p class="text-xs text-slate-500 mt-0.5">${c.type} · ${c.products_count || 0} produk · ${c.affiliates_count || 0} afiliator</p>
+          </div>
+          <span class="status-badge ${st}">${c.status}</span>
+        </div>
+        <div class="flex items-center justify-between mt-3 text-xs text-slate-400">
+          <span>Komisi: <span class="text-orange-400 font-medium">${c.commission_info || '-'}</span></span>
+          <span>${c.period_end || ''}</span>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderChart() {
+  const canvas = document.getElementById('gmvChart');
+  if (!canvas) return;
+  if (gmvChart) gmvChart.destroy();
+  const t = window.MOCK_TREND;
+  gmvChart = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: t.labels,
+      datasets: [
+        {
+          label: 'GMV (juta)', data: t.gmv,
+          borderColor: '#f97316', backgroundColor: 'rgba(249,115,22,0.08)',
+          fill: true, tension: 0.4, pointRadius: 4, pointBackgroundColor: '#f97316',
+          pointBorderColor: '#0f172a', pointBorderWidth: 2,
+        },
+        {
+          label: 'Order', data: t.orders,
+          borderColor: '#38bdf8', backgroundColor: 'transparent', borderDash: [5, 5],
+          tension: 0.4, pointRadius: 3, pointBackgroundColor: '#38bdf8', yAxisID: 'y1',
+        }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'top', align: 'end', labels: { color: '#94a3b8', boxWidth: 12, usePointStyle: true } },
+        tooltip: { backgroundColor: '#1e293b', titleColor: '#f1f5f9', bodyColor: '#cbd5e1', borderColor: '#334155', borderWidth: 1 }
+      },
+      scales: {
+        y: { beginAtZero: true, grid: { color: 'rgba(51,65,85,0.5)' }, ticks: { color: '#64748b', callback: v => v + 'jt' } },
+        y1: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false }, ticks: { color: '#64748b' } },
+        x: { grid: { display: false }, ticks: { color: '#64748b' } }
+      }
+    }
+  });
+}
+
+// ---------- Actions ----------
+function switchTab(tab) {
+  state.tab = tab;
+  document.querySelectorAll('[data-tab]').forEach(el => el.classList.toggle('nav-active', el.dataset.tab === tab));
+  document.querySelectorAll('[data-panel]').forEach(el => el.classList.toggle('hidden', el.dataset.panel !== tab));
+  if (tab === 'dashboard') setTimeout(renderChart, 40);
+}
+
+async function refreshAll() {
+  const btn = document.getElementById('btnRefresh');
+  const icon = btn?.querySelector('i');
+  if (icon) icon.classList.add('fa-spin');
+  if (btn) btn.disabled = true;
+
+  await Promise.all([loadShops(), loadAffiliates(), loadCampaigns()]);
+  renderChart();
+
+  if (icon) icon.classList.remove('fa-spin');
+  if (btn) btn.disabled = false;
+  showToast('Data diperbarui', 'success');
+}
+
+async function syncShop(shopId) {
+  showToast('Sync toko ' + shopId + ' ...', 'info');
+  try {
+    const res = await fetch(`${API}/api/sync/${shopId}`, { method: 'POST' });
+    const data = await res.json();
+    if (data.error) showToast(data.error, 'info');
+    else {
+      showToast(`Synced ${data.synced || 0} afiliator`, 'success');
+      await loadAffiliates();
+    }
+  } catch (e) {
+    showToast('Sync gagal: ' + e.message, 'info');
+  }
+}
+
+function showToast(msg, type = 'info') {
+  document.querySelector('.toast')?.remove();
+  const t = document.createElement('div');
+  t.className = `toast toast-${type}`;
+  t.innerHTML = `<i class="fas ${type === 'success' ? 'fa-check-circle' : 'fa-info-circle'}"></i><span>${msg}</span>`;
+  document.body.appendChild(t);
+  setTimeout(() => t.classList.add('show'), 10);
+  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 2800);
+}
+
+// ---------- Init ----------
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('shopSelect')?.addEventListener('change', e => {
+    state.shop = e.target.value;
+    loadAffiliates();
+    loadCampaigns();
+  });
+  document.getElementById('channelSelect')?.addEventListener('change', e => {
+    state.channel = e.target.value;
+    loadAffiliates();
+  });
+  document.getElementById('periodSelect')?.addEventListener('change', e => {
+    state.period = e.target.value;
+    loadAffiliates();
+  });
+  document.getElementById('searchInput')?.addEventListener('input', e => {
+    state.search = e.target.value;
+    loadAffiliates();
+  });
+  document.querySelectorAll('[data-tab]').forEach(el => {
+    el.addEventListener('click', ev => { ev.preventDefault(); switchTab(el.dataset.tab); });
+  });
+
+  refreshAll();
+});
