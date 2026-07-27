@@ -3,7 +3,7 @@ const router = express.Router();
 const { query } = require('../db');
 const shopee = require('../services/shopee');
 
-const PERIOD_DAYS = { Last7d: 7, Last30d: 30, Last1d: 1 };
+const PERIOD_DAYS = { Last1d: 1, Last7d: 7, Last30d: 30 };
 
 /**
  * Resolve a period label into concrete dates.
@@ -12,10 +12,17 @@ const PERIOD_DAYS = { Last7d: 7, Last30d: 30, Last1d: 1 };
  * distinct), which would insert a duplicate row on every sync.
  */
 function periodRange(periodType) {
-  const days = PERIOD_DAYS[periodType] || 30;
-  const end = new Date();
-  const start = new Date(end.getTime() - (days - 1) * 86400000);
   const fmt = (d) => d.toISOString().slice(0, 10);
+  const end = new Date();
+
+  // "Month" means month-to-date, not a rolling 30-day window.
+  if (periodType === 'Month') {
+    const start = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
+    return { startDate: fmt(start), endDate: fmt(end) };
+  }
+
+  const days = PERIOD_DAYS[periodType] || 30;
+  const start = new Date(end.getTime() - (days - 1) * 86400000);
   return { startDate: fmt(start), endDate: fmt(end) };
 }
 
@@ -165,19 +172,19 @@ router.get('/affiliates', async (req, res) => {
 
     // Try live performance first if mode=live and shop has token
     const mode = process.env.APP_MODE || 'mock';
+    let liveError = null;
 
     if (mode === 'live' && shopId) {
       const { rows: shops } = await query(`SELECT * FROM shops WHERE shop_id = $1`, [shopId]);
       if (shops.length && shops[0].access_token) {
         try {
           const token = await shopee.ensureValidToken(shops[0]);
-          const result = await shopee.getAffiliatePerformance(shopId, token, {
+          const rows = await shopee.getAllAffiliatePerformance(shopId, token, {
             periodType: period,
-            channel: channel === 'all' || !channel ? 'AllChannel' : channel,
-            pageSize: 100,
+            channel,
           });
 
-          const list = (result.response?.list || []).map((a) => ({
+          const list = rows.map((a) => ({
             affiliate_id: a.affiliate_id,
             name: a.affiliate_name,
             username: a.affiliate_username,
@@ -188,13 +195,16 @@ router.get('/affiliates', async (req, res) => {
             roi: Number(a.roi || 0),
             total_buyers: a.total_buyers || 0,
             new_buyers: a.new_buyers || 0,
-            channel: channel || 'AllChannel',
+            channel: shopee.normalizeChannel(channel),
             status: 'active',
           }));
 
           return res.json({ data: list, source: 'live' });
         } catch (apiErr) {
+          // Falling back to cache keeps the dashboard usable, but the reason
+          // must reach the client or a misconfigured filter looks like "no data".
           console.error('[API] Live fetch failed, fallback to cache:', apiErr.message);
+          liveError = apiErr.message;
         }
       }
     }
@@ -240,7 +250,7 @@ router.get('/affiliates', async (req, res) => {
     const { rows } = await query(sql, params);
 
     // If empty and mock mode → return seeded mock from memory is handled by frontend
-    res.json({ data: rows, source: 'cache' });
+    res.json({ data: rows, source: 'cache', ...(liveError ? { live_error: liveError } : {}) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -332,17 +342,14 @@ router.post('/sync/:shopId', async (req, res) => {
     const token = await shopee.ensureValidToken(shop);
 
     const periodType = req.body?.period || 'Last30d';
-    const channel = req.body?.channel || 'AllChannel';
+    const channel = shopee.normalizeChannel(req.body?.channel);
     const { startDate, endDate } = periodRange(periodType);
 
-    // Fetch performance
-    const perf = await shopee.getAffiliatePerformance(shopId, token, {
+    // Fetch every page — page_size is capped at 50, so one call is not enough.
+    const list = await shopee.getAllAffiliatePerformance(shopId, token, {
       periodType,
       channel,
-      pageSize: 100,
     });
-
-    const list = perf.response?.list || [];
     let upserted = 0;
 
     for (const a of list) {

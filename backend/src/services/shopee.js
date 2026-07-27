@@ -165,11 +165,51 @@ async function shopeeRequest({ method = 'GET', path, shopId, accessToken, body =
 
 // ---------- High level helpers ----------
 
+/**
+ * Shopee rejected page_size=100 with "invalid page_size", so the ceiling is
+ * lower than the usual v2 limit. 50 is the documented default for AMS list
+ * endpoints; override with SHOPEE_PAGE_SIZE if your app's quota differs.
+ */
+function getPageSize() {
+  const raw = Number(process.env.SHOPEE_PAGE_SIZE || 50);
+  if (!Number.isFinite(raw) || raw < 1) return 50;
+  return Math.min(Math.floor(raw), 50);
+}
+
+/**
+ * Channel filter values the AMS API accepts. The dashboard's <select> uses
+ * short keys, which must never be forwarded raw — Shopee rejects them.
+ * Anything unrecognised degrades to AllChannel rather than erroring the sync.
+ */
+const CHANNEL_MAP = {
+  all: 'AllChannel',
+  allchannel: 'AllChannel',
+  social: 'SocialMedia',
+  'social media': 'SocialMedia',
+  socialmedia: 'SocialMedia',
+  video: 'ShopeeVideo',
+  'shopee video': 'ShopeeVideo',
+  shopeevideo: 'ShopeeVideo',
+  live: 'LiveStreaming',
+  'live streaming': 'LiveStreaming',
+  livestreaming: 'LiveStreaming',
+};
+
+function normalizeChannel(channel) {
+  if (!channel) return 'AllChannel';
+  const hit = CHANNEL_MAP[String(channel).trim().toLowerCase()];
+  if (!hit) {
+    console.warn(`[SHOPEE] channel "${channel}" tidak dikenal — pakai AllChannel`);
+    return 'AllChannel';
+  }
+  return hit;
+}
+
 async function getShopsByPartner() {
   return shopeeRequest({
     method: 'GET',
     path: '/api/v2/public/get_shops_by_partner',
-    queryParams: { page_size: 100, page_no: 1 },
+    queryParams: { page_size: getPageSize(), page_no: 1 },
   });
 }
 
@@ -181,16 +221,16 @@ async function getAffiliatePerformance(shopId, accessToken, opts = {}) {
     channel = 'AllChannel',
     orderType = 'ConfirmedOrder',
     pageNo = 1,
-    pageSize = 50,
+    pageSize = getPageSize(),
     affiliateId,
   } = opts;
 
   const queryParams = {
     period_type: periodType,
-    channel,
+    channel: normalizeChannel(channel),
     order_type: orderType,
     page_no: pageNo,
-    page_size: pageSize,
+    page_size: Math.min(Number(pageSize) || getPageSize(), 50),
   };
   if (startDate) queryParams.start_date = startDate;
   if (endDate) queryParams.end_date = endDate;
@@ -205,13 +245,39 @@ async function getAffiliatePerformance(shopId, accessToken, opts = {}) {
   });
 }
 
-async function getManagedAffiliateList(shopId, accessToken, pageNo = 1, pageSize = 50) {
+/**
+ * Walk every page of affiliate performance.
+ * With page_size capped at 50 a single call no longer covers a full roster,
+ * so callers that need the whole list must paginate.
+ */
+async function getAllAffiliatePerformance(shopId, accessToken, opts = {}, maxPages = 40) {
+  const pageSize = getPageSize();
+  const all = [];
+
+  for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
+    const res = await getAffiliatePerformance(shopId, accessToken, { ...opts, pageNo, pageSize });
+    const list = res.response?.list || [];
+    all.push(...list);
+
+    // Stop on an explicit "no more pages" flag, or on a short/empty page.
+    const more = res.response?.more ?? res.response?.has_next_page;
+    if (more === false || list.length < pageSize) break;
+
+    if (pageNo === maxPages) {
+      console.warn(`[SHOPEE] shop ${shopId}: berhenti di ${maxPages} halaman, mungkin masih ada sisa`);
+    }
+  }
+
+  return all;
+}
+
+async function getManagedAffiliateList(shopId, accessToken, pageNo = 1, pageSize = getPageSize()) {
   return shopeeRequest({
     method: 'GET',
     path: '/api/v2/ams/get_managed_affiliate_list',
     shopId,
     accessToken,
-    queryParams: { page_no: pageNo, page_size: pageSize },
+    queryParams: { page_no: pageNo, page_size: Math.min(Number(pageSize) || 50, 50) },
   });
 }
 
@@ -275,7 +341,10 @@ module.exports = {
   getShopInfo,
   shopeeRequest,
   getShopsByPartner,
+  getPageSize,
+  normalizeChannel,
   getAffiliatePerformance,
+  getAllAffiliatePerformance,
   getManagedAffiliateList,
   refreshAccessToken,
   ensureValidToken,

@@ -179,6 +179,10 @@ async function loadAffiliates() {
   const res = await apiGet('/api/affiliates?' + params.toString());
   let data = res?.data || [];
 
+  // The server falls back to cached rows when the live call fails; without
+  // this the dashboard would just look empty for no visible reason.
+  if (res?.live_error) showToast('Shopee API: ' + res.live_error, 'info');
+
   if (!data.length) {
     // Fallback mock + client filter
     data = [...(window.MOCK_AFFILIATES || [])];
