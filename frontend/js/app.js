@@ -217,7 +217,7 @@ async function loadCampaigns() {
 function updateModeBadge() {
   const el = document.getElementById('modeBadge');
   if (!el) return;
-  if (state.mode === 'live' && state.source === 'live') {
+  if (state.mode === 'live' && (state.source === 'live' || state.source === 'cache')) {
     el.textContent = 'LIVE API';
     el.className = 'mode-badge mode-live';
   } else if (state.mode === 'live' && state.source === 'empty') {
