@@ -6,6 +6,7 @@ const compression = require('compression');
 const morgan = require('morgan');
 const path = require('path');
 const apiRoutes = require('./routes/api');
+const { requireAdmin, getAdminToken } = require('./middleware/auth');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,12 +14,20 @@ const PORT = process.env.PORT || 3000;
 // Security & performance
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(compression());
-app.use(cors());
+// Frontend is served from this same origin, so no CORS headers are needed by
+// default. Set CORS_ORIGIN only when hosting the frontend separately.
+app.use(cors({ origin: process.env.CORS_ORIGIN || false }));
 app.use(express.json({ limit: '2mb' }));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
-// API
-app.use('/api', apiRoutes);
+// API (admin-protected, except /api/health and /api/auth/callback)
+app.use('/api', requireAdmin, apiRoutes);
+
+// JSON 404 for unknown API routes — must come before the SPA fallback,
+// otherwise a typo'd endpoint silently returns index.html with status 200.
+app.use('/api', (_req, res) => {
+  res.status(404).json({ error: 'Endpoint tidak ditemukan' });
+});
 
 // Serve frontend static
 const frontendPath = path.join(__dirname, '../../frontend');
@@ -36,12 +45,23 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
+  const auth = getAdminToken() ? 'protected' : 'OPEN (!)';
   console.log(`
 ╔══════════════════════════════════════════════╗
 ║   Shopee Affiliate Manager                   ║
 ║   Mode : ${(process.env.APP_MODE || 'mock').padEnd(10)}                     ║
 ║   Port : ${String(PORT).padEnd(10)}                     ║
-║   Ready for EasyPanel + PostgreSQL           ║
+║   Auth : ${auth.padEnd(10)}                     ║
 ╚══════════════════════════════════════════════╝
   `);
+
+  if (!getAdminToken()) {
+    console.warn(
+      '[WARN] ADMIN_TOKEN belum diset — API terbuka tanpa autentikasi.\n' +
+      '       Wajib diisi sebelum deploy ke domain publik.'
+    );
+  }
+  if (!process.env.SHOPEE_REDIRECT_URI) {
+    console.warn('[WARN] SHOPEE_REDIRECT_URI belum diset — tombol "Hubungkan Toko" akan gagal.');
+  }
 });

@@ -3,6 +3,22 @@ const router = express.Router();
 const { query } = require('../db');
 const shopee = require('../services/shopee');
 
+const PERIOD_DAYS = { Last7d: 7, Last30d: 30, Last1d: 1 };
+
+/**
+ * Resolve a period label into concrete dates.
+ * Snapshots must carry start_date/end_date: they are part of the unique key,
+ * and NULLs there make ON CONFLICT never match (Postgres treats NULL as
+ * distinct), which would insert a duplicate row on every sync.
+ */
+function periodRange(periodType) {
+  const days = PERIOD_DAYS[periodType] || 30;
+  const end = new Date();
+  const start = new Date(end.getTime() - (days - 1) * 86400000);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  return { startDate: fmt(start), endDate: fmt(end) };
+}
+
 // ---------- Health ----------
 router.get('/health', async (_req, res) => {
   try {
@@ -10,6 +26,89 @@ router.get('/health', async (_req, res) => {
     res.json({ status: 'ok', mode: process.env.APP_MODE || 'mock', time: new Date().toISOString() });
   } catch (e) {
     res.status(500).json({ status: 'error', message: e.message });
+  }
+});
+
+// ---------- Auth (admin session) ----------
+router.post('/auth/login', (_req, res) => {
+  // requireAdmin already validated the token before reaching here.
+  res.json({ success: true });
+});
+
+// ---------- Authorization (Shopee OAuth) ----------
+
+/**
+ * Step 1 — frontend asks for the authorization URL and redirects the seller.
+ * The link expires after 5 minutes, so it is built fresh on every call.
+ */
+router.get('/auth/url', (req, res) => {
+  try {
+    const url = shopee.buildAuthUrl(req.query.redirect_uri);
+    res.json({ url });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+/**
+ * Step 2 — Shopee redirects the seller's browser here with ?code=&shop_id=.
+ * Public by design (see middleware/auth.js). Responds with a redirect back to
+ * the dashboard rather than JSON, because a human is looking at this.
+ */
+router.get('/auth/callback', async (req, res) => {
+  const { code, shop_id: shopId } = req.query;
+  const back = (status, msg) =>
+    res.redirect(`/?auth=${status}&msg=${encodeURIComponent(msg)}`);
+
+  if (!code || !shopId) {
+    return back('error', 'Callback tidak membawa code/shop_id. Pastikan redirect URI di Shopee Console sama persis dengan SHOPEE_REDIRECT_URI.');
+  }
+
+  try {
+    const token = await shopee.getAccessToken(code, shopId);
+
+    // Shop name is a nice-to-have — never fail authorization over it.
+    let shopName = null;
+    let region = null;
+    try {
+      const info = await shopee.getShopInfo(shopId, token.access_token);
+      shopName = info.shop_name || null;
+      region = info.region || null;
+    } catch (infoErr) {
+      console.warn('[AUTH] get_shop_info gagal:', infoErr.message);
+    }
+
+    const expireAt = new Date(Date.now() + (token.expire_in || 14400) * 1000);
+
+    await query(
+      `INSERT INTO shops (shop_id, shop_name, region, access_token, refresh_token, token_expire_at, status, auth_time)
+       VALUES ($1, $2, $3, $4, $5, $6, 'active', NOW())
+       ON CONFLICT (shop_id) DO UPDATE SET
+         shop_name = COALESCE(EXCLUDED.shop_name, shops.shop_name),
+         region = COALESCE(EXCLUDED.region, shops.region),
+         access_token = EXCLUDED.access_token,
+         refresh_token = EXCLUDED.refresh_token,
+         token_expire_at = EXCLUDED.token_expire_at,
+         status = 'active',
+         auth_time = NOW(),
+         updated_at = NOW()`,
+      [shopId, shopName, region || process.env.SHOPEE_REGION || 'ID',
+       token.access_token, token.refresh_token, expireAt]
+    );
+
+    await query(
+      `INSERT INTO sync_logs (shop_id, action, status, message) VALUES ($1, 'authorize', 'success', $2)`,
+      [shopId, `Shop ${shopName || shopId} berhasil diotorisasi`]
+    ).catch(() => {});
+
+    return back('success', `Toko ${shopName || shopId} berhasil terhubung`);
+  } catch (e) {
+    console.error('[AUTH] callback gagal:', e.message);
+    await query(
+      `INSERT INTO sync_logs (shop_id, action, status, message) VALUES ($1, 'authorize', 'error', $2)`,
+      [shopId, e.message]
+    ).catch(() => {});
+    return back('error', e.message);
   }
 });
 
@@ -112,13 +211,16 @@ router.get('/affiliates', async (req, res) => {
       FROM affiliates a
       LEFT JOIN LATERAL (
         SELECT * FROM affiliate_performance ap
-        WHERE ap.affiliate_id = a.affiliate_id AND ap.shop_id = a.shop_id
+        WHERE ap.affiliate_id = a.affiliate_id
+          AND ap.shop_id = a.shop_id
+          AND ap.period_type = $1
         ORDER BY ap.synced_at DESC LIMIT 1
       ) p ON true
       WHERE 1=1
     `;
-    const params = [];
-    let idx = 1;
+    // $1 is the period filter above; user filters continue from $2.
+    const params = [period];
+    let idx = 2;
 
     if (shopId && shopId !== 'all') {
       sql += ` AND a.shop_id = $${idx++}`;
@@ -166,23 +268,35 @@ router.get('/campaigns', async (req, res) => {
 router.get('/dashboard/summary', async (req, res) => {
   try {
     const shopId = req.query.shop_id;
+    const period = req.query.period || 'Last30d';
+    const channel = req.query.channel && req.query.channel !== 'all'
+      ? req.query.channel
+      : 'AllChannel';
 
-    // Simple aggregate from performance table
-    let sql = `
+    // Aggregate over the newest snapshot per affiliate only. Summing the raw
+    // table would double count: it holds one row per period/channel/date range.
+    const params = [period, channel];
+    let filter = `WHERE period_type = $1 AND channel = $2`;
+    if (shopId && shopId !== 'all') {
+      params.push(shopId);
+      filter += ` AND shop_id = $${params.length}`;
+    }
+
+    const sql = `
       SELECT
         COALESCE(SUM(gmv), 0) AS total_gmv,
         COALESCE(SUM(orders), 0) AS total_orders,
         COALESCE(SUM(est_commission), 0) AS total_commission,
         COALESCE(SUM(clicks), 0) AS total_clicks,
-        COUNT(DISTINCT affiliate_id) AS affiliate_count
-      FROM affiliate_performance
-      WHERE 1=1
+        COUNT(*) AS affiliate_count
+      FROM (
+        SELECT DISTINCT ON (affiliate_id, shop_id)
+               affiliate_id, shop_id, gmv, orders, est_commission, clicks
+        FROM affiliate_performance
+        ${filter}
+        ORDER BY affiliate_id, shop_id, synced_at DESC
+      ) latest
     `;
-    const params = [];
-    if (shopId && shopId !== 'all') {
-      sql += ` AND shop_id = $1`;
-      params.push(shopId);
-    }
 
     const { rows } = await query(sql, params);
     const s = rows[0] || {};
@@ -217,9 +331,14 @@ router.post('/sync/:shopId', async (req, res) => {
     const shop = rows[0];
     const token = await shopee.ensureValidToken(shop);
 
+    const periodType = req.body?.period || 'Last30d';
+    const channel = req.body?.channel || 'AllChannel';
+    const { startDate, endDate } = periodRange(periodType);
+
     // Fetch performance
     const perf = await shopee.getAffiliatePerformance(shopId, token, {
-      periodType: 'Last30d',
+      periodType,
+      channel,
       pageSize: 100,
     });
 
@@ -241,8 +360,9 @@ router.post('/sync/:shopId', async (req, res) => {
       // Upsert performance
       await query(
         `INSERT INTO affiliate_performance
-           (affiliate_id, shop_id, period_type, gmv, orders, clicks, est_commission, roi, total_buyers, new_buyers, synced_at)
-         VALUES ($1, $2, 'Last30d', $3, $4, $5, $6, $7, $8, $9, NOW())
+           (affiliate_id, shop_id, period_type, start_date, end_date, channel,
+            gmv, orders, clicks, est_commission, roi, total_buyers, new_buyers, synced_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
          ON CONFLICT (affiliate_id, shop_id, period_type, start_date, end_date, channel)
          DO UPDATE SET
            gmv = EXCLUDED.gmv,
@@ -256,6 +376,10 @@ router.post('/sync/:shopId', async (req, res) => {
         [
           a.affiliate_id,
           shopId,
+          periodType,
+          startDate,
+          endDate,
+          channel,
           Number(a.sales || 0),
           a.orders || 0,
           a.clicks || 0,

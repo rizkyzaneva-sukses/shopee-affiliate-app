@@ -39,15 +39,109 @@ function getStatusBadge(s) {
   return { cls: 'status-inactive', text: 'Nonaktif' };
 }
 
+// ---------- Admin session ----------
+const TOKEN_KEY = 'sam_admin_token';
+
+function getAdminToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
+function setAdminToken(t) { localStorage.setItem(TOKEN_KEY, t); }
+function clearAdminToken() { localStorage.removeItem(TOKEN_KEY); }
+
+function authHeaders() {
+  const t = getAdminToken();
+  return t ? { Authorization: `Bearer ${t}` } : {};
+}
+
+/** Shows the login overlay and resolves once a token is accepted. */
+function requireLogin() {
+  if (document.getElementById('loginOverlay')) return;
+
+  const el = document.createElement('div');
+  el.id = 'loginOverlay';
+  el.style.cssText =
+    'position:fixed;inset:0;z-index:9999;background:rgba(2,6,23,.92);' +
+    'display:flex;align-items:center;justify-content:center;padding:1rem';
+  el.innerHTML = `
+    <div class="card p-6" style="max-width:22rem;width:100%">
+      <h2 class="text-base font-semibold text-slate-100 mb-1">Masuk</h2>
+      <p class="text-xs text-slate-500 mb-4">Masukkan admin token (env <code>ADMIN_TOKEN</code>).</p>
+      <input id="loginToken" type="password" autocomplete="current-password"
+             class="w-full mb-3 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-slate-100"
+             placeholder="Admin token">
+      <p id="loginError" class="text-xs text-red-400 mb-3 hidden"></p>
+      <button id="loginBtn" class="btn btn-primary w-full justify-center">Masuk</button>
+    </div>`;
+  document.body.appendChild(el);
+
+  const submit = async () => {
+    const val = document.getElementById('loginToken').value.trim();
+    const err = document.getElementById('loginError');
+    if (!val) return;
+    setAdminToken(val);
+    const res = await fetch(`${API}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    });
+    if (res.ok) {
+      el.remove();
+      refreshAll();
+    } else {
+      clearAdminToken();
+      err.textContent = res.status === 401 ? 'Token salah.' : 'Gagal masuk (' + res.status + ').';
+      err.classList.remove('hidden');
+    }
+  };
+
+  document.getElementById('loginBtn').addEventListener('click', submit);
+  document.getElementById('loginToken').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') submit();
+  });
+}
+
 async function apiGet(path) {
   try {
-    const res = await fetch(`${API}${path}`);
+    const res = await fetch(`${API}${path}`, { headers: authHeaders() });
+    if (res.status === 401) {
+      clearAdminToken();
+      requireLogin();
+      return null;
+    }
     if (!res.ok) throw new Error(res.statusText);
     return await res.json();
   } catch (e) {
     console.warn('[API]', path, e.message);
     return null;
   }
+}
+
+// ---------- Shop authorization ----------
+async function connectShop() {
+  showToast('Menyiapkan link otorisasi Shopee...', 'info');
+  try {
+    // Direct fetch, not apiGet: the server's error message is the useful part
+    // here (missing partner id, missing redirect uri) and must not be swallowed.
+    const res = await fetch(`${API}/api/auth/url`, { headers: authHeaders() });
+    const data = await res.json();
+    if (res.status === 401) {
+      clearAdminToken();
+      return requireLogin();
+    }
+    if (res.ok && data.url) {
+      window.location.href = data.url;
+    } else {
+      showToast(data.error || 'Gagal membuat link otorisasi.', 'info');
+    }
+  } catch (e) {
+    showToast('Gagal membuat link otorisasi: ' + e.message, 'info');
+  }
+}
+
+/** Reads ?auth=success|error&msg=... left by the OAuth callback redirect. */
+function handleAuthResult() {
+  const p = new URLSearchParams(window.location.search);
+  const status = p.get('auth');
+  if (!status) return;
+  showToast(p.get('msg') || status, status === 'success' ? 'success' : 'info');
+  window.history.replaceState({}, '', window.location.pathname);
 }
 
 // ---------- Data loading ----------
@@ -308,7 +402,15 @@ async function refreshAll() {
 async function syncShop(shopId) {
   showToast('Sync toko ' + shopId + ' ...', 'info');
   try {
-    const res = await fetch(`${API}/api/sync/${shopId}`, { method: 'POST' });
+    const res = await fetch(`${API}/api/sync/${shopId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ period: state.period }),
+    });
+    if (res.status === 401) {
+      clearAdminToken();
+      return requireLogin();
+    }
     const data = await res.json();
     if (data.error) showToast(data.error, 'info');
     else {
@@ -353,5 +455,6 @@ document.addEventListener('DOMContentLoaded', () => {
     el.addEventListener('click', ev => { ev.preventDefault(); switchTab(el.dataset.tab); });
   });
 
+  handleAuthResult();
   refreshAll();
 });

@@ -34,8 +34,8 @@ CREATE TABLE IF NOT EXISTS shops (
   updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_shops_shop_id ON shops(shop_id);
-CREATE INDEX idx_shops_status ON shops(status);
+CREATE INDEX IF NOT EXISTS idx_shops_shop_id ON shops(shop_id);
+CREATE INDEX IF NOT EXISTS idx_shops_status ON shops(status);
 
 -- Affiliates (cached from AMS API)
 CREATE TABLE IF NOT EXISTS affiliates (
@@ -55,8 +55,8 @@ CREATE TABLE IF NOT EXISTS affiliates (
   UNIQUE(affiliate_id, shop_id)
 );
 
-CREATE INDEX idx_affiliates_shop ON affiliates(shop_id);
-CREATE INDEX idx_affiliates_status ON affiliates(status);
+CREATE INDEX IF NOT EXISTS idx_affiliates_shop ON affiliates(shop_id);
+CREATE INDEX IF NOT EXISTS idx_affiliates_status ON affiliates(status);
 
 -- Performance snapshots (per period)
 CREATE TABLE IF NOT EXISTS affiliate_performance (
@@ -80,8 +80,8 @@ CREATE TABLE IF NOT EXISTS affiliate_performance (
   UNIQUE(affiliate_id, shop_id, period_type, start_date, end_date, channel)
 );
 
-CREATE INDEX idx_perf_shop_period ON affiliate_performance(shop_id, period_type);
-CREATE INDEX idx_perf_affiliate ON affiliate_performance(affiliate_id);
+CREATE INDEX IF NOT EXISTS idx_perf_shop_period ON affiliate_performance(shop_id, period_type);
+CREATE INDEX IF NOT EXISTS idx_perf_affiliate ON affiliate_performance(affiliate_id);
 
 -- Campaigns
 CREATE TABLE IF NOT EXISTS campaigns (
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_campaigns_shop ON campaigns(shop_id);
+CREATE INDEX IF NOT EXISTS idx_campaigns_shop ON campaigns(shop_id);
 
 -- Sync logs (optional, useful for debugging)
 CREATE TABLE IF NOT EXISTS sync_logs (
@@ -114,7 +114,10 @@ CREATE TABLE IF NOT EXISTS sync_logs (
   created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Seed default settings (edit after deploy)
+-- Seed default settings (edit after deploy).
+-- Guarded by NOT EXISTS rather than ON CONFLICT: `settings` has no unique
+-- constraint besides its serial PK, so ON CONFLICT would never fire and a
+-- duplicate row would be added every time this schema is re-applied.
 INSERT INTO settings (partner_id, partner_key, region, mode)
-VALUES (0, 'CHANGE_ME', 'ID', 'mock')
-ON CONFLICT DO NOTHING;
+SELECT 0, 'CHANGE_ME', 'ID', 'mock'
+WHERE NOT EXISTS (SELECT 1 FROM settings);

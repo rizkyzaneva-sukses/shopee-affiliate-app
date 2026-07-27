@@ -37,12 +37,16 @@ NODE_ENV=production
 PORT=3000
 APP_MODE=mock
 
+# Wajib di production — tanpa ini semua endpoint /api dibalas 503
+ADMIN_TOKEN=hasil_dari_openssl_rand_hex_32
+
 DATABASE_URL=postgres://USER:PASSWORD@HOST:5432/DBNAME
 
 SHOPEE_PARTNER_ID=200xxxx
 SHOPEE_PARTNER_KEY=your_key
 SHOPEE_REGION=ID
 SHOPEE_BASE_URL=https://partner.shopeemobile.com
+SHOPEE_REDIRECT_URI=https://domain-anda.com/api/auth/callback
 ```
 
 - Link ke service PostgreSQL (EasyPanel biasanya otomatis isi `DATABASE_URL`)
@@ -91,32 +95,62 @@ docker compose up --build
 
 ## Alur Integrasi API Real
 
-1. Daftar App di [Shopee Open Platform](https://open.shopee.com/)  
-   Tipe: **Affiliate Marketing Solution Management**
+> **Penting:** Shopee Open Platform tidak memakai login username/password akun
+> Shopee. Anda perlu mendaftarkan sebuah *app*, lalu setiap toko memberi
+> otorisasi ke app tersebut.
 
-2. Isi environment:
-   ```
-   APP_MODE=live
-   SHOPEE_PARTNER_ID=...
-   SHOPEE_PARTNER_KEY=...
-   ```
+### 1. Daftar App di [Shopee Open Platform](https://open.shopee.com/)
 
-3. Authorization tiap toko (OAuth Shopee) → dapat `code` → tukar jadi `access_token` + `refresh_token`
+Setelah app disetujui Anda mendapat **Partner ID** dan **Partner Key**.
+Di console, daftarkan juga **Redirect URL** — harus sama persis dengan
+`SHOPEE_REDIRECT_URI`, termasuk `http`/`https` dan trailing slash.
 
-4. Simpan token:
-   ```http
-   POST /api/shops
-   {
-     "shop_id": 123456,
-     "shop_name": "Toko Saya",
-     "region": "ID",
-     "access_token": "...",
-     "refresh_token": "...",
-     "expire_in": 14400
-   }
-   ```
+### 2. Isi environment
 
-5. Klik **Sync** di halaman Toko Saya → data afiliator masuk DB & muncul di dashboard.
+```
+APP_MODE=live
+SHOPEE_PARTNER_ID=...
+SHOPEE_PARTNER_KEY=...
+SHOPEE_REDIRECT_URI=https://domain-anda.com/api/auth/callback
+ADMIN_TOKEN=...
+```
+
+### 3. Hubungkan toko
+
+Buka dashboard → tab **Toko Saya** → **Hubungkan Toko**.
+
+Alurnya:
+
+```
+Frontend ──GET /api/auth/url──► Backend
+                                  │ build & sign auth_partner URL (berlaku 5 menit)
+         ◄────── { url } ─────────┘
+         │
+         └─► Seller login & approve di halaman Shopee
+                        │
+                        └─► redirect ke /api/auth/callback?code=...&shop_id=...
+                                          │ POST /api/v2/auth/token/get
+                                          │ simpan access_token + refresh_token ke DB
+                                          └─► redirect balik ke dashboard
+```
+
+Token otomatis di-refresh (`/api/v2/auth/access_token/get`) 30 menit sebelum
+kedaluwarsa, jadi tidak perlu otorisasi ulang selama refresh token masih hidup.
+
+`POST /api/shops` tetap tersedia untuk memasukkan token secara manual bila Anda
+sudah punya dari sumber lain.
+
+### 4. Sync
+
+Klik **Sync** di halaman Toko Saya → data afiliator masuk DB & muncul di dashboard.
+
+> ⚠️ **Endpoint AMS belum terverifikasi.** `/api/v2/ams/get_affiliate_performance`
+> dan `/api/v2/ams/get_managed_affiliate_list` di [`services/shopee.js`](backend/src/services/shopee.js)
+> tidak dapat dikonfirmasi keberadaannya di dokumentasi Shopee Open Platform v2.
+> Cocokkan dulu path dan nama field-nya dengan dokumentasi yang Anda terima saat
+> app disetujui. Perlu diketahui bahwa **Shopee Affiliate Open API** (sisi
+> creator) adalah platform yang berbeda: GraphQL di host
+> `open-api.affiliate.shopee.*`, memakai App ID + Secret, bukan Partner ID/Key.
 
 ---
 
@@ -148,11 +182,17 @@ shopee-affiliate-app/
 
 ## API Endpoints (internal)
 
+Semua endpoint butuh header `Authorization: Bearer $ADMIN_TOKEN`, kecuali yang
+ditandai **publik**.
+
 | Method | Path | Keterangan |
 |--------|------|------------|
-| GET | `/api/health` | Health check |
+| GET | `/api/health` | Health check — **publik** |
+| GET | `/api/auth/callback` | Callback OAuth Shopee — **publik** (dilindungi oleh `code` sekali pakai) |
+| GET | `/api/auth/url` | Bangun link otorisasi toko |
+| POST | `/api/auth/login` | Verifikasi admin token |
 | GET | `/api/shops` | Daftar toko |
-| POST | `/api/shops` | Tambah/update token toko |
+| POST | `/api/shops` | Tambah/update token toko manual |
 | GET | `/api/affiliates` | List + performa |
 | GET | `/api/campaigns` | Campaign |
 | GET | `/api/dashboard/summary` | KPI summary |
@@ -160,4 +200,11 @@ shopee-affiliate-app/
 
 ---
 
-Siap dipakai. Setelah deploy, ganti `APP_MODE=live` dan masukkan token toko.
+## Keamanan
+
+- `ADMIN_TOKEN` melindungi seluruh `/api`. Bila kosong di `NODE_ENV=production`,
+  server membalas 503 — sengaja gagal-tertutup agar token toko tidak bocor.
+- CORS mati secara default (frontend satu origin dengan backend). Set
+  `CORS_ORIGIN` hanya bila frontend di-host terpisah.
+- `access_token` / `refresh_token` masih disimpan **plaintext** di PostgreSQL.
+  Pertimbangkan enkripsi at-rest bila database dapat diakses pihak lain.

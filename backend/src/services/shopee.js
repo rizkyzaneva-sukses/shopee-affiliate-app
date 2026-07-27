@@ -11,9 +11,27 @@ function getConfig() {
     partnerId: process.env.SHOPEE_PARTNER_ID || '',
     partnerKey: process.env.SHOPEE_PARTNER_KEY || '',
     baseUrl: process.env.SHOPEE_BASE_URL || 'https://partner.shopeemobile.com',
+    redirectUri: process.env.SHOPEE_REDIRECT_URI || '',
     region: process.env.SHOPEE_REGION || 'ID',
     mode: process.env.APP_MODE || 'mock',
   };
+}
+
+/**
+ * Validate that credentials needed for live calls are present.
+ * Throws a message the user can act on instead of letting Shopee reply 403.
+ */
+function assertCredentials() {
+  const { partnerId, partnerKey } = getConfig();
+  const missing = [];
+  if (!partnerId) missing.push('SHOPEE_PARTNER_ID');
+  if (!partnerKey) missing.push('SHOPEE_PARTNER_KEY');
+  if (missing.length) {
+    throw new Error(
+      `Kredensial Shopee belum diisi: ${missing.join(', ')}. ` +
+      'Daftarkan app di https://open.shopee.com/ untuk mendapatkannya.'
+    );
+  }
 }
 
 /**
@@ -26,6 +44,84 @@ function generateSign(path, timestamp, accessToken = '', shopId = '') {
   const { partnerId, partnerKey } = getConfig();
   const base = `${partnerId}${path}${timestamp}${accessToken}${shopId}`;
   return crypto.createHmac('sha256', partnerKey).update(base).digest('hex');
+}
+
+// ---------- Authorization (OAuth) ----------
+
+const AUTH_PARTNER_PATH = '/api/v2/shop/auth_partner';
+const TOKEN_GET_PATH = '/api/v2/auth/token/get';
+const TOKEN_REFRESH_PATH = '/api/v2/auth/access_token/get';
+
+/**
+ * Build the Shopee shop-authorization URL.
+ * The seller opens this, approves, and Shopee redirects to
+ * `redirect` with ?code=...&shop_id=... appended.
+ * Link is only valid for 5 minutes — always build it on demand.
+ */
+function buildAuthUrl(redirectUri) {
+  assertCredentials();
+  const cfg = getConfig();
+  const redirect = redirectUri || cfg.redirectUri;
+  if (!redirect) {
+    throw new Error('SHOPEE_REDIRECT_URI belum diisi. Contoh: https://domain-anda.com/api/auth/callback');
+  }
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  // redirect is NOT part of the signed base string
+  const sign = generateSign(AUTH_PARTNER_PATH, timestamp);
+
+  const params = new URLSearchParams({
+    partner_id: cfg.partnerId,
+    timestamp: String(timestamp),
+    sign,
+    redirect,
+  });
+
+  return `${cfg.baseUrl}${AUTH_PARTNER_PATH}?${params.toString()}`;
+}
+
+/**
+ * Exchange the one-time `code` from the auth callback for tokens.
+ * Public API: signed with partner_id + path + timestamp only.
+ */
+async function getAccessToken(code, shopId) {
+  assertCredentials();
+  const cfg = getConfig();
+  const timestamp = Math.floor(Date.now() / 1000);
+  const sign = generateSign(TOKEN_GET_PATH, timestamp);
+
+  const url = `${cfg.baseUrl}${TOKEN_GET_PATH}?partner_id=${cfg.partnerId}&timestamp=${timestamp}&sign=${sign}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      code,
+      shop_id: Number(shopId),
+      partner_id: Number(cfg.partnerId),
+    }),
+  });
+
+  const data = await res.json();
+  if (data.error) {
+    const err = new Error(data.message || data.error);
+    err.code = data.error;
+    err.requestId = data.request_id;
+    throw err;
+  }
+  return data; // { access_token, refresh_token, expire_in }
+}
+
+/**
+ * Fetch shop profile so we can store a real name instead of a bare ID.
+ * Note: get_shop_info returns its fields flat, not nested under `response`.
+ */
+async function getShopInfo(shopId, accessToken) {
+  return shopeeRequest({
+    method: 'GET',
+    path: '/api/v2/shop/get_shop_info',
+    shopId,
+    accessToken,
+  });
 }
 
 async function shopeeRequest({ method = 'GET', path, shopId, accessToken, body = null, queryParams = {} }) {
@@ -120,8 +216,9 @@ async function getManagedAffiliateList(shopId, accessToken, pageNo = 1, pageSize
 }
 
 async function refreshAccessToken(shopId, refreshToken) {
+  assertCredentials();
   const cfg = getConfig();
-  const path = '/api/v2/auth/access_token/get';
+  const path = TOKEN_REFRESH_PATH;
   const timestamp = Math.floor(Date.now() / 1000);
   const sign = generateSign(path, timestamp);
 
@@ -171,7 +268,11 @@ async function ensureValidToken(shop) {
 
 module.exports = {
   getConfig,
+  assertCredentials,
   generateSign,
+  buildAuthUrl,
+  getAccessToken,
+  getShopInfo,
   shopeeRequest,
   getShopsByPartner,
   getAffiliatePerformance,
