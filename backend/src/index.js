@@ -59,24 +59,25 @@ app.use((err, _req, res, _next) => {
 });
 
 // Auto-run migrations on startup
-const { pool: migrationPool } = require('./db');
 (async () => {
   const migrationDir = path.join(__dirname, '../../database');
   try {
+    const { Pool } = require('pg');
+    const migPool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
     const files = fs.readdirSync(migrationDir)
       .filter(f => f.startsWith('migration_') && f.endsWith('.sql'))
       .sort();
-    const client = await migrationPool.connect();
+    const client = await migPool.connect();
     for (const file of files) {
       const sql = fs.readFileSync(path.join(migrationDir, file), 'utf8');
       await client.query(sql);
       console.log(`[MIGRATE] Applied: ${file}`);
     }
     client.release();
+    await migPool.end();
   } catch (e) {
     console.error('[MIGRATE] Error:', e.message);
   }
-  migrationPool.end();
 })();
 
 app.listen(PORT, '0.0.0.0', () => {
