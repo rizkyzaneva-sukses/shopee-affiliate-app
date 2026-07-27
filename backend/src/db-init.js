@@ -1,5 +1,5 @@
 /**
- * Initialize database schema
+ * Initialize database schema + run migrations
  * Run: npm run db:init
  */
 require('dotenv').config();
@@ -17,6 +17,18 @@ async function init() {
     console.log('[DB-INIT] Running schema.sql ...');
     await client.query(sql);
     console.log('[DB-INIT] Schema applied successfully.');
+
+    // Run migrations
+    const migrationDir = path.join(__dirname, '../../database');
+    const migrations = fs.readdirSync(migrationDir)
+      .filter(f => f.startsWith('migration_') && f.endsWith('.sql'))
+      .sort();
+    for (const file of migrations) {
+      const msql = fs.readFileSync(path.join(migrationDir, file), 'utf8');
+      console.log(`[DB-INIT] Running migration: ${file}`);
+      await client.query(msql);
+    }
+    console.log('[DB-INIT] All migrations applied.');
   } catch (e) {
     console.error('[DB-INIT] Failed:', e.message);
     process.exit(1);

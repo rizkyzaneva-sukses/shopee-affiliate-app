@@ -253,13 +253,14 @@ router.post('/sync/all', async (req, res) => {
 
         for (const a of list) {
           await query(
-            `INSERT INTO affiliates (affiliate_id, shop_id, name, username, status)
-             VALUES ($1, $2, $3, $4, 'active')
+            `INSERT INTO affiliates (affiliate_id, shop_id, name, username, channel, status)
+             VALUES ($1, $2, $3, $4, $5, 'active')
              ON CONFLICT (affiliate_id, shop_id) DO UPDATE SET
                name = EXCLUDED.name,
                username = EXCLUDED.username,
+               channel = EXCLUDED.channel,
                updated_at = NOW()`,
-            [a.affiliate_id, shop.shop_id, a.affiliate_name, a.affiliate_username]
+            [a.affiliate_id, shop.shop_id, a.affiliate_name, a.affiliate_username, channel]
           );
 
           await query(
@@ -382,6 +383,7 @@ router.get('/affiliates', async (req, res) => {
     let sql = `
       SELECT a.affiliate_id, a.name, a.username, a.channel, a.status, a.followers,
              a.shop_id, a.last_active_at,
+             COALESCE(a.channel, p.channel) AS channel_resolved,
              COALESCE(p.gmv, 0) AS gmv,
              COALESCE(p.orders, 0) AS orders,
              COALESCE(p.clicks, 0) AS clicks,
@@ -392,22 +394,22 @@ router.get('/affiliates', async (req, res) => {
         SELECT * FROM affiliate_performance ap
         WHERE ap.affiliate_id = a.affiliate_id
           AND ap.shop_id = a.shop_id
-          AND ap.period_type = $1
         ORDER BY ap.synced_at DESC LIMIT 1
       ) p ON true
       WHERE 1=1
     `;
-    // $1 is the period filter above; user filters continue from $2.
-    const params = [period];
-    let idx = 2;
+    // User filters start from $1.
+    const params = [];
+    let idx = 1;
 
     if (shopId && shopId !== 'all') {
       sql += ` AND a.shop_id = $${idx++}`;
       params.push(shopId);
     }
     if (channel && channel !== 'all') {
-      sql += ` AND a.channel ILIKE $${idx++}`;
+      sql += ` AND (a.channel ILIKE $${idx} OR p.channel ILIKE $${idx})`;
       params.push(channel);
+      idx++;
     }
     if (search) {
       sql += ` AND (a.name ILIKE $${idx} OR a.username ILIKE $${idx})`;
@@ -447,18 +449,17 @@ router.get('/campaigns', async (req, res) => {
 router.get('/dashboard/summary', async (req, res) => {
   try {
     const shopId = req.query.shop_id;
-    const period = req.query.period || 'Last30d';
     const channel = req.query.channel && req.query.channel !== 'all'
       ? req.query.channel
       : 'AllChannel';
 
     // Aggregate over the newest snapshot per affiliate only. Summing the raw
     // table would double count: it holds one row per period/channel/date range.
-    const params = [period, channel];
-    let filter = `WHERE period_type = $1 AND channel = $2`;
+    const params = [channel];
+    let filter = `WHERE channel = $1`;
     if (shopId && shopId !== 'all') {
       params.push(shopId);
-      filter += ` AND shop_id = $${params.length}`;
+      filter += ` AND shop_id = $${params.length}`; 
     }
 
     const sql = `
@@ -526,13 +527,14 @@ router.post('/sync/:shopId', async (req, res) => {
     for (const a of list) {
       // Upsert affiliate
       await query(
-        `INSERT INTO affiliates (affiliate_id, shop_id, name, username, status)
-         VALUES ($1, $2, $3, $4, 'active')
+        `INSERT INTO affiliates (affiliate_id, shop_id, name, username, channel, status)
+         VALUES ($1, $2, $3, $4, $5, 'active')
          ON CONFLICT (affiliate_id, shop_id) DO UPDATE SET
            name = EXCLUDED.name,
            username = EXCLUDED.username,
+           channel = EXCLUDED.channel,
            updated_at = NOW()`,
-        [a.affiliate_id, shopId, a.affiliate_name, a.affiliate_username]
+        [a.affiliate_id, shopId, a.affiliate_name, a.affiliate_username, channel]
       );
 
       // Upsert performance
@@ -582,6 +584,179 @@ router.post('/sync/:shopId', async (req, res) => {
       `INSERT INTO sync_logs (shop_id, action, status, message) VALUES ($1, 'sync_performance', 'error', $2)`,
       [shopId, e.message]
     ).catch(() => {});
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Campaign sync ----------
+/**
+ * Sync campaigns for a single shop from the Shopee AMS API.
+ * Stores them in the campaigns table (upsert by campaign_id + shop_id).
+ */
+router.post('/sync/campaigns/:shopId', async (req, res) => {
+  const shopId = req.params.shopId;
+  const mode = process.env.APP_MODE || 'mock';
+  if (mode !== 'live') {
+    return res.json({ message: 'Mode mock — sync campaigns dilewati.', synced: 0 });
+  }
+
+  try {
+    const { rows } = await query(`SELECT * FROM shops WHERE shop_id = $1`, [shopId]);
+    if (!rows.length) return res.status(404).json({ error: 'Shop not found' });
+
+    const shop = rows[0];
+    const token = await shopee.ensureValidToken(shop);
+
+    // Fetch all pages of campaigns
+    let pageNo = 1;
+    let allCampaigns = [];
+    const pageSize = 50;
+    while (true) {
+      const res2 = await shopee.getManagedCampaignList(shopId, token, pageNo, pageSize);
+      const list = res2.response?.campaign_list || res2.response?.list || [];
+      allCampaigns.push(...list);
+      const more = res2.response?.more ?? res2.response?.has_next_page;
+      if (more === false || list.length < pageSize) break;
+      pageNo++;
+      if (pageNo > 50) break; // safety limit
+    }
+
+    let upserted = 0;
+    for (const c of allCampaigns) {
+      const campaignId = c.campaign_id || c.id;
+      if (!campaignId) continue;
+
+      await query(
+        `INSERT INTO campaigns (campaign_id, shop_id, name, type, status, commission_info,
+                                products_count, affiliates_count, period_start, period_end, raw_data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (campaign_id, shop_id) DO UPDATE SET
+           name = EXCLUDED.name,
+           type = EXCLUDED.type,
+           status = EXCLUDED.status,
+           commission_info = EXCLUDED.commission_info,
+           products_count = EXCLUDED.products_count,
+           affiliates_count = EXCLUDED.affiliates_count,
+           period_start = EXCLUDED.period_start,
+           period_end = EXCLUDED.period_end,
+           raw_data = EXCLUDED.raw_data,
+           updated_at = NOW()`,
+        [
+          campaignId,
+          shopId,
+          c.name || c.campaign_name || null,
+          c.type || c.campaign_type || null,
+          c.status || c.campaign_status || null,
+          c.commission_info || c.commission_rate || null,
+          c.products_count || 0,
+          c.affiliates_count || 0,
+          c.period_start || c.start_time || null,
+          c.period_end || c.end_time || null,
+          JSON.stringify(c),
+        ]
+      );
+      upserted++;
+    }
+
+    await query(
+      `INSERT INTO sync_logs (shop_id, action, status, message) VALUES ($1, 'sync_campaigns', 'success', $2)`,
+      [shopId, `Synced ${upserted} campaigns for shop ${shopId}`]
+    ).catch(() => {});
+
+    res.json({ success: true, synced: upserted, total_fetched: allCampaigns.length });
+  } catch (e) {
+    await query(
+      `INSERT INTO sync_logs (shop_id, action, status, message) VALUES ($1, 'sync_campaigns', 'error', $2)`,
+      [shopId, e.message]
+    ).catch(() => {});
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * Sync campaigns for ALL active shops.
+ */
+router.get('/campaigns/sync-all', async (_req, res) => {
+  const mode = process.env.APP_MODE || 'mock';
+  if (mode !== 'live') {
+    return res.json({ message: 'Mode mock — sync campaigns dilewati.', synced: 0 });
+  }
+
+  try {
+    const { rows: shops } = await query(`SELECT * FROM shops WHERE status = 'active' ORDER BY shop_name`);
+    if (!shops.length) return res.json({ message: 'Tidak ada toko aktif.', synced: 0 });
+
+    let totalSynced = 0;
+    const results = [];
+
+    for (const shop of shops) {
+      try {
+        const token = await shopee.ensureValidToken(shop);
+
+        let pageNo = 1;
+        let allCampaigns = [];
+        const pageSize = 50;
+        while (true) {
+          const res2 = await shopee.getManagedCampaignList(shop.shop_id, token, pageNo, pageSize);
+          const list = res2.response?.campaign_list || res2.response?.list || [];
+          allCampaigns.push(...list);
+          const more = res2.response?.more ?? res2.response?.has_next_page;
+          if (more === false || list.length < pageSize) break;
+          pageNo++;
+          if (pageNo > 50) break;
+        }
+
+        let count = 0;
+        for (const c of allCampaigns) {
+          const campaignId = c.campaign_id || c.id;
+          if (!campaignId) continue;
+
+          await query(
+            `INSERT INTO campaigns (campaign_id, shop_id, name, type, status, commission_info,
+                                    products_count, affiliates_count, period_start, period_end, raw_data)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             ON CONFLICT (campaign_id, shop_id) DO UPDATE SET
+               name = EXCLUDED.name,
+               type = EXCLUDED.type,
+               status = EXCLUDED.status,
+               commission_info = EXCLUDED.commission_info,
+               products_count = EXCLUDED.products_count,
+               affiliates_count = EXCLUDED.affiliates_count,
+               period_start = EXCLUDED.period_start,
+               period_end = EXCLUDED.period_end,
+               raw_data = EXCLUDED.raw_data,
+               updated_at = NOW()`,
+            [
+              campaignId,
+              shop.shop_id,
+              c.name || c.campaign_name || null,
+              c.type || c.campaign_type || null,
+              c.status || c.campaign_status || null,
+              c.commission_info || c.commission_rate || null,
+              c.products_count || 0,
+              c.affiliates_count || 0,
+              c.period_start || c.start_time || null,
+              c.period_end || c.end_time || null,
+              JSON.stringify(c),
+            ]
+          );
+          count++;
+        }
+        totalSynced += count;
+        results.push({ shop_id: shop.shop_id, name: shop.shop_name, synced: count });
+      } catch (e) {
+        console.error(`[CAMPAIGN-SYNC-ALL] Shop ${shop.shop_id} gagal:`, e.message);
+        results.push({ shop_id: shop.shop_id, name: shop.shop_name, error: e.message });
+      }
+    }
+
+    await query(
+      `INSERT INTO sync_logs (shop_id, action, status, message) VALUES (0, 'sync_campaigns_all', 'success', $1)`,
+      [`Synced ${totalSynced} campaigns from ${shops.length} shops`]
+    ).catch(() => {});
+
+    res.json({ success: true, total: totalSynced, shops: results });
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });

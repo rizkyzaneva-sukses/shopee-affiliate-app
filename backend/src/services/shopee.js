@@ -350,6 +350,16 @@ async function getManagedAffiliateList(shopId, accessToken, pageNo = 1, pageSize
   });
 }
 
+async function getManagedCampaignList(shopId, accessToken, pageNo = 1, pageSize = getPageSize()) {
+  return shopeeRequest({
+    method: 'GET',
+    path: '/api/v2/ams/get_managed_campaign_list',
+    shopId,
+    accessToken,
+    queryParams: { page_no: pageNo, page_size: Math.min(Number(pageSize) || 50, 50) },
+  });
+}
+
 async function refreshAccessToken(shopId, refreshToken) {
   assertCredentials();
   const cfg = getConfig();
@@ -416,6 +426,7 @@ module.exports = {
   getAllAffiliatePerformance,
   probePageSizes,
   getManagedAffiliateList,
+  getManagedCampaignList,
   refreshAccessToken,
   ensureValidToken,
 };

@@ -98,7 +98,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
   period_end      TIMESTAMPTZ,
   raw_data        JSONB DEFAULT '{}',
   created_at      TIMESTAMPTZ DEFAULT NOW(),
-  updated_at      TIMESTAMPTZ DEFAULT NOW()
+  updated_at      TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(campaign_id, shop_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_campaigns_shop ON campaigns(shop_id);

@@ -94,9 +94,9 @@
           </select>
           <select id="channelSelect" class="select">
             <option value="all">Semua Channel</option>
-            <option value="social">Social Media</option>
-            <option value="video">Shopee Video</option>
-            <option value="live">Live Streaming</option>
+            <option value="SocialMedia">Social Media</option>
+            <option value="ShopeeVideo">Shopee Video</option>
+            <option value="LiveStreaming">Live Streaming</option>
           </select>
           <button id="btnRefresh" onclick="refreshAll()" class="btn btn-primary"><i class="fas fa-sync-alt text-xs"></i> Refresh</button>
         </div>
@@ -153,8 +153,32 @@
 
     <!-- Affiliates -->
     <div data-panel="affiliates" class="p-5 hidden">
-      <div class="card p-6 text-center text-slate-500 text-sm">
-        Gunakan filter di header + tabel di Dashboard. Data yang sama.
+      <div class="card overflow-hidden">
+        <div class="px-4 py-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+          <h3 class="text-sm font-semibold text-slate-200">Daftar Afiliator</h3>
+          <div class="flex items-center gap-2">
+            <input id="searchInputFull" type="text" placeholder="Cari nama / username..." class="input w-48" />
+            <span class="text-xs text-slate-500" id="affiliateCountFull">—</span>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-left text-xs text-slate-500 border-b border-slate-800">
+                <th class="px-4 py-2.5 font-medium">#</th>
+                <th class="px-4 py-2.5 font-medium">Afiliator</th>
+                <th class="px-4 py-2.5 font-medium">Channel</th>
+                <th class="px-4 py-2.5 font-medium text-right">GMV</th>
+                <th class="px-4 py-2.5 font-medium text-right">Order</th>
+                <th class="px-4 py-2.5 font-medium text-right">Klik</th>
+                <th class="px-4 py-2.5 font-medium text-right">Komisi</th>
+                <th class="px-4 py-2.5 font-medium text-right">ROI</th>
+                <th class="px-4 py-2.5 font-medium text-center">Status</th>
+              </tr>
+            </thead>
+            <tbody id="affiliateTableFull"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -162,7 +186,10 @@
     <div data-panel="campaigns" class="p-5 hidden space-y-4">
       <div class="flex items-center justify-between">
         <h3 class="text-sm font-semibold text-slate-200">Campaign</h3>
-        <button class="btn btn-primary" onclick="showToast('Siap dihubungkan ke v2.ams.create_new_targeted_campaign','info')"><i class="fas fa-plus text-xs"></i> Buat Campaign</button>
+        <div class="flex gap-2">
+          <button class="btn btn-ghost" id="btnSyncCampaigns" onclick="syncCampaigns()"><i class="fas fa-sync-alt text-xs"></i> Sync Campaigns</button>
+          <button class="btn btn-primary" onclick="showToast('Coming soon','info')"><i class="fas fa-plus text-xs"></i> Buat Campaign</button>
+        </div>
       </div>
       <div id="campaignList" class="grid sm:grid-cols-2 gap-3"></div>
     </div>

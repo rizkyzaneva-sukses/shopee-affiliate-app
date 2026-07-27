@@ -277,11 +277,15 @@ function renderTop() {
 
 function renderTable() {
   const tbody = document.getElementById('affiliateTable');
-  document.getElementById('affiliateCount').textContent = state.affiliates.length + ' afiliator';
+  const tbodyFull = document.getElementById('affiliateTableFull');
+  const countEl = document.getElementById('affiliateCount');
+  const countFull = document.getElementById('affiliateCountFull');
+  if (countEl) countEl.textContent = state.affiliates.length + ' afiliator';
+  if (countFull) countFull.textContent = state.affiliates.length + ' afiliator';
 
-  if (!state.affiliates.length) {
+  function emptyRow() {
     const hasShops = state.shops.length > 0;
-    tbody.innerHTML = `
+    return `
       <tr><td colspan="9" class="text-center py-12">
         <div class="flex flex-col items-center gap-3">
           <i class="fas ${hasShops ? 'fa-sync-alt' : 'fa-store'} text-3xl text-slate-700"></i>
@@ -292,36 +296,50 @@ function renderTable() {
           ${hasShops ? '<button class="btn btn-primary mt-2" onclick="syncAllShops()"><i class="fas fa-sync-alt"></i> Sync Semua Toko</button>' : ''}
         </div>
       </td></tr>`;
+  }
+
+  if (!state.affiliates.length) {
+    tbody.innerHTML = emptyRow();
+    if (tbodyFull) tbodyFull.innerHTML = emptyRow();
     return;
   }
 
-  tbody.innerHTML = state.affiliates.map((a, i) => {
-    const st = getStatusBadge(a.status || 'active');
-    const initials = (a.name || '??').split(' ').map(w => w[0]).slice(0, 2).join('').toUpperCase();
-    return `
-      <tr class="table-row">
-        <td class="td-rank">${i + 1}</td>
-        <td>
-          <div class="flex items-center gap-3">
-            <div class="avatar">${initials}</div>
-            <div>
-              <p class="font-medium text-slate-100">${a.name || '-'}</p>
-              <p class="text-xs text-slate-500">@${a.username || '-'} · ${a.followers || ''}</p>
+  function renderRows(data) {
+    return data.map((a, i) => {
+      const st = getStatusBadge(a.status || 'active');
+      const initials = (a.name || '??').split(' ').map(w => w[0]).slice(0, 2).join('').toUpperCase();
+      return `
+        <tr class="table-row">
+          <td class="td-rank">${i + 1}</td>
+          <td>
+            <div class="flex items-center gap-3">
+              <div class="avatar">${initials}</div>
+              <div>
+                <p class="font-medium text-slate-100">${a.name || '-'}</p>
+                <p class="text-xs text-slate-500">@${a.username || '-'} · ${a.followers || ''}</p>
+              </div>
             </div>
-          </div>
-        </td>
-        <td><span class="badge ${getChannelBadge(a.channel)}">${a.channel || '-'}</span></td>
-        <td class="text-right font-medium text-slate-100">${formatRupiah(a.gmv)}</td>
-        <td class="text-right text-slate-300">${formatNumber(a.orders)}</td>
-        <td class="text-right text-slate-300">${formatNumber(a.clicks)}</td>
-        <td class="text-right font-medium text-orange-400">${formatRupiah(a.commission)}</td>
-        <td class="text-right font-semibold text-emerald-400">${Number(a.roi || 0).toFixed(1)}x</td>
-        <td class="text-center">
-          <span class="status-badge ${st.cls}">${st.text}</span>
-          <p class="text-[10px] text-slate-500 mt-0.5">${a.last_active_at || a.last_active || ''}</p>
-        </td>
-      </tr>`;
-  }).join('');
+          </td>
+          <td><span class="badge ${getChannelBadge(a.channel)}">${a.channel || '-'}</span></td>
+          <td class="text-right font-medium text-slate-100">${formatRupiah(a.gmv)}</td>
+          <td class="text-right text-slate-300">${formatNumber(a.orders)}</td>
+          <td class="text-right text-slate-300">${formatNumber(a.clicks)}</td>
+          <td class="text-right font-medium text-orange-400">${formatRupiah(a.commission)}</td>
+          <td class="text-right font-semibold text-emerald-400">${Number(a.roi || 0).toFixed(1)}x</td>
+          <td class="text-center">
+            <span class="status-badge ${st.cls}">${st.text}</span>
+            <p class="text-[10px] text-slate-500 mt-0.5">${a.last_active_at || a.last_active || ''}</p>
+          </td>
+        </tr>`;
+    }).join('');
+  }
+
+  tbody.innerHTML = renderRows(state.affiliates);
+
+  // Also render into the Affiliates tab table
+  if (tbodyFull) {
+    tbodyFull.innerHTML = renderRows(state.affiliates);
+  }
 }
 
 function renderShopSelect() {
@@ -407,6 +425,24 @@ function renderCampaigns() {
         </div>
       </div>`;
   }).join('');
+}
+
+async function syncCampaigns() {
+  const btn = document.getElementById('btnSyncCampaigns');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Syncing...'; }
+
+  showToast('Sync campaigns dari Shopee...', 'info');
+  const res = await apiPost('/api/campaigns/sync-all');
+
+  if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sync-alt text-xs"></i> Sync Campaigns'; }
+
+  if (res?.error) {
+    showToast(res.error, 'info');
+  } else {
+    const count = res?.synced || res?.data?.length || 0;
+    showToast(`Synced ${count} campaign`, 'success');
+    await loadCampaigns();
+  }
 }
 
 function renderChart() {
@@ -565,6 +601,10 @@ document.addEventListener('DOMContentLoaded', () => {
     loadAffiliates();
   });
   document.getElementById('searchInput')?.addEventListener('input', e => {
+    state.search = e.target.value;
+    loadAffiliates();
+  });
+  document.getElementById('searchInputFull')?.addEventListener('input', e => {
     state.search = e.target.value;
     loadAffiliates();
   });

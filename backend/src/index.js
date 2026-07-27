@@ -58,6 +58,27 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: err.message || 'Internal Server Error' });
 });
 
+// Auto-run migrations on startup
+const { pool: migrationPool } = require('./db');
+(async () => {
+  const migrationDir = path.join(__dirname, '../../database');
+  try {
+    const files = fs.readdirSync(migrationDir)
+      .filter(f => f.startsWith('migration_') && f.endsWith('.sql'))
+      .sort();
+    const client = await migrationPool.connect();
+    for (const file of files) {
+      const sql = fs.readFileSync(path.join(migrationDir, file), 'utf8');
+      await client.query(sql);
+      console.log(`[MIGRATE] Applied: ${file}`);
+    }
+    client.release();
+  } catch (e) {
+    console.error('[MIGRATE] Error:', e.message);
+  }
+  migrationPool.end();
+})();
+
 app.listen(PORT, '0.0.0.0', () => {
   const auth = getAdminToken() ? 'protected' : 'OPEN (!)';
   console.log(`
