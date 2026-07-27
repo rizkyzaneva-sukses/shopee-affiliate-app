@@ -447,6 +447,131 @@ router.get('/campaigns', async (req, res) => {
   }
 });
 
+// ---------- Dashboard Trend (daily GMV/orders) ----------
+router.get('/dashboard/trend', async (req, res) => {
+  try {
+    const shopId = req.query.shop_id;
+    const period = req.query.period || 'Last30d';
+    const days = { Last7d: 7, Last30d: 30, Month: 30 }[period] || 30;
+
+    const fmt = (d) => d.toISOString().slice(0, 10).replace(/-/g, '');
+    const end = new Date();
+    const start = new Date(end.getTime() - (days - 1) * 86400000);
+
+    // Aggregate GMV/orders per day using synced_at date
+    let sql = `
+      SELECT
+        TO_CHAR(synced_at AT TIME ZONE 'Asia/Jakarta', 'DD Mon') AS label,
+        TO_CHAR(synced_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS date_key,
+        SUM(gmv) AS gmv,
+        SUM(orders) AS orders,
+        SUM(est_commission) AS commission,
+        SUM(clicks) AS clicks,
+        COUNT(DISTINCT affiliate_id) AS affiliates
+      FROM affiliate_performance
+      WHERE synced_at >= $1
+        AND synced_at < ($2::date + INTERVAL '1 day')
+    `;
+    const params = [start, end];
+    let idx = 3;
+
+    if (shopId && shopId !== 'all') {
+      sql += ` AND shop_id = $${idx++}`;
+      params.push(shopId);
+    }
+
+    sql += ` GROUP BY date_key, label ORDER BY date_key`;
+
+    const { rows } = await query(sql, params);
+
+    // Fill in missing days with zeros
+    const dataMap = {};
+    for (const r of rows) {
+      dataMap[r.date_key] = {
+        label: r.label,
+        gmv: Number(r.gmv || 0),
+        orders: Number(r.orders || 0),
+        commission: Number(r.commission || 0),
+        clicks: Number(r.clicks || 0),
+        affiliates: Number(r.affiliates || 0),
+      };
+    }
+
+    const labels = [];
+    const gmv = [];
+    const orders = [];
+    const commissions = [];
+    for (let i = 0; i < days; i++) {
+      const d = new Date(start.getTime() + i * 86400000);
+      const key = d.toISOString().slice(0, 10);
+      const shortLabel = d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' });
+      const entry = dataMap[key];
+      labels.push(shortLabel);
+      gmv.push(entry ? entry.gmv / 1e6 : 0); // convert to millions
+      orders.push(entry ? entry.orders : 0);
+      commissions.push(entry ? entry.commission : 0);
+    }
+
+    res.json({ labels, gmv, orders, commissions });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Goals CRUD ----------
+router.get('/goals', async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT * FROM goals WHERE active = true ORDER BY created_at DESC`
+    );
+    res.json({ data: rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.post('/goals', async (req, res) => {
+  try {
+    const { name, target_gmv, target_orders, target_commission, period } = req.body;
+    if (!name || !target_gmv) {
+      return res.status(400).json({ error: 'name and target_gmv are required' });
+    }
+    const { rows } = await query(
+      `INSERT INTO goals (name, target_gmv, target_orders, target_commission, period, active)
+       VALUES ($1, $2, $3, $4, $5, true) RETURNING *`,
+      [name, target_gmv, target_orders || 0, target_commission || 0, period || 'Month']
+    );
+    res.json({ success: true, data: rows[0] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.put('/goals/:id', async (req, res) => {
+  try {
+    const { name, target_gmv, target_orders, target_commission, period, active } = req.body;
+    await query(
+      `UPDATE goals SET name = COALESCE($1, name), target_gmv = COALESCE($2, target_gmv),
+       target_orders = COALESCE($3, target_orders), target_commission = COALESCE($4, target_commission),
+       period = COALESCE($5, period), active = COALESCE($6, active), updated_at = NOW()
+       WHERE id = $7`,
+      [name, target_gmv, target_orders, target_commission, period, active, req.params.id]
+    );
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.delete('/goals/:id', async (req, res) => {
+  try {
+    await query(`UPDATE goals SET active = false WHERE id = $1`, [req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---------- Dashboard summary ----------
 router.get('/dashboard/summary', async (req, res) => {
   try {

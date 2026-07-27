@@ -14,6 +14,8 @@ let state = {
   shops: [],
   affiliates: [],
   campaigns: [],
+  goals: [],
+  trend: null,
   source: 'live',
   mode: null,   // 'live' | 'mock', from /api/health
   syncing: false,
@@ -144,6 +146,33 @@ async function apiPost(path, body = {}) {
   }
 }
 
+async function apiPut(path, body = {}) {
+  try {
+    const res = await fetch(`${API}${path}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+    return await res.json();
+  } catch (e) {
+    console.warn('[API]', path, e.message);
+    return null;
+  }
+}
+
+async function apiDelete(path) {
+  try {
+    const res = await fetch(`${API}${path}`, {
+      method: 'DELETE',
+      headers: authHeaders(),
+    });
+    return await res.json();
+  } catch (e) {
+    console.warn('[API]', path, e.message);
+    return null;
+  }
+}
+
 // ---------- Shop authorization ----------
 async function connectShop() {
   showToast('Menyiapkan link otorisasi Shopee...', 'info');
@@ -201,9 +230,28 @@ async function loadAffiliates() {
   state.source = data.length ? (res?.source || 'live') : 'empty';
   state.affiliates = data.sort((a, b) => (b.gmv || 0) - (a.gmv || 0));
   updateKPI();
+  updateQuickStats();
   renderTop();
   renderTable();
   updateModeBadge();
+}
+
+async function loadTrend() {
+  const params = new URLSearchParams();
+  if (state.shop !== 'all') params.set('shop_id', state.shop);
+  params.set('period', state.period);
+
+  const res = await apiGet('/api/dashboard/trend?' + params.toString());
+  if (res && res.labels) {
+    state.trend = res;
+    renderChart();
+  }
+}
+
+async function loadGoals() {
+  const res = await apiGet('/api/goals');
+  state.goals = res?.data || [];
+  renderGoals();
 }
 
 async function loadCampaigns() {
@@ -246,6 +294,34 @@ function updateKPI() {
   document.getElementById('kpiActive').textContent = active + ' / ' + d.length;
 }
 
+function updateQuickStats() {
+  const d = state.affiliates;
+  const gmv = d.reduce((s, a) => s + Number(a.gmv || 0), 0);
+  const orders = d.reduce((s, a) => s + Number(a.orders || 0), 0);
+  const commission = d.reduce((s, a) => s + Number(a.commission || 0), 0);
+  const clicks = d.reduce((s, a) => s + Number(a.clicks || 0), 0);
+  const newBuyers = d.reduce((s, a) => s + Number(a.new_buyers || 0), 0);
+
+  // AOV
+  const aov = orders > 0 ? gmv / orders : 0;
+  const el1 = document.getElementById('statAov');
+  if (el1) el1.textContent = formatRupiah(aov);
+
+  // CVR
+  const cvr = clicks > 0 ? (orders / clicks * 100) : 0;
+  const el2 = document.getElementById('statCvr');
+  if (el2) el2.textContent = cvr.toFixed(1) + '%';
+
+  // Commission rate
+  const commRate = gmv > 0 ? (commission / gmv * 100) : 0;
+  const el3 = document.getElementById('statCommRate');
+  if (el3) el3.textContent = commRate.toFixed(1) + '%';
+
+  // New buyers
+  const el4 = document.getElementById('statNewBuyers');
+  if (el4) el4.textContent = formatNumber(newBuyers);
+}
+
 function renderTop() {
   const el = document.getElementById('topAffiliates');
   const top = state.affiliates.slice(0, 5);
@@ -258,18 +334,31 @@ function renderTop() {
       </div>`;
     return;
   }
+
+  // Calculate max GMV for bar width
+  const maxGmv = top[0]?.gmv || 1;
+
   el.innerHTML = top.map((a, i) => {
     const rank = i === 0 ? 'rank-gold' : i === 1 ? 'rank-silver' : i === 2 ? 'rank-bronze' : '';
+    const pct = Math.round(((a.gmv || 0) / maxGmv) * 100);
+    const commRate = a.gmv > 0 ? ((a.commission / a.gmv) * 100).toFixed(1) : '0';
+    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '';
     return `
       <div class="top-item ${rank}">
-        <div class="rank-num">${i + 1}</div>
+        <div class="rank-num">${medal || (i + 1)}</div>
         <div class="flex-1 min-w-0">
           <p class="font-medium text-sm text-slate-100 truncate">${a.name || a.username}</p>
-          <p class="text-xs text-slate-500">@${a.username || '-'}</p>
+          <div class="flex items-center gap-2 mt-1">
+            <div class="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+              <div class="h-full bg-gradient-to-r from-orange-500 to-amber-400 rounded-full" style="width:${pct}%"></div>
+            </div>
+            <span class="text-[10px] text-slate-500">${commRate}%</span>
+          </div>
+          <p class="text-[10px] text-slate-500 mt-0.5">${a.orders || 0} order · @${a.username || '-'}</p>
         </div>
-        <div class="text-right">
+        <div class="text-right flex-shrink-0">
           <p class="font-semibold text-sm text-orange-400">${formatRupiah(a.gmv)}</p>
-          <p class="text-xs text-slate-500">${a.orders || 0} order</p>
+          <p class="text-[10px] text-emerald-400">${formatRupiah(a.commission)}</p>
         </div>
       </div>`;
   }).join('');
@@ -308,6 +397,7 @@ function renderTable() {
     return data.map((a, i) => {
       const st = getStatusBadge(a.status || 'active');
       const initials = (a.name || '??').split(' ').map(w => w[0]).slice(0, 2).join('').toUpperCase();
+      const commRate = a.gmv > 0 ? ((a.commission / a.gmv) * 100).toFixed(1) : '0';
       return `
         <tr class="table-row">
           <td class="td-rank">${i + 1}</td>
@@ -325,7 +415,7 @@ function renderTable() {
           <td class="text-right text-slate-300">${formatNumber(a.orders)}</td>
           <td class="text-right text-slate-300">${formatNumber(a.clicks)}</td>
           <td class="text-right font-medium text-orange-400">${formatRupiah(a.commission)}</td>
-          <td class="text-right font-semibold text-emerald-400">${Number(a.roi || 0).toFixed(1)}x</td>
+          <td class="text-right"><span class="text-xs text-emerald-400">${commRate}%</span> <span class="font-semibold text-slate-100">${Number(a.roi || 0).toFixed(1)}x</span></td>
           <td class="text-center">
             <span class="status-badge ${st.cls}">${st.text}</span>
             <p class="text-[10px] text-slate-500 mt-0.5">${a.last_active_at || a.last_active || ''}</p>
@@ -427,32 +517,15 @@ function renderCampaigns() {
   }).join('');
 }
 
-async function syncCampaigns() {
-  const btn = document.getElementById('btnSyncCampaigns');
-  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Syncing...'; }
-
-  showToast('Sync campaigns dari Shopee...', 'info');
-  const res = await apiPost('/api/campaigns/sync-all');
-
-  if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sync-alt text-xs"></i> Sync Campaigns'; }
-
-  if (res?.error) {
-    showToast(res.error, 'info');
-  } else {
-    const count = res?.synced || res?.data?.length || 0;
-    showToast(`Synced ${count} campaign`, 'success');
-    await loadCampaigns();
-  }
-}
-
 function renderChart() {
   const canvas = document.getElementById('gmvChart');
   if (!canvas) return;
   if (gmvChart) gmvChart.destroy();
 
-  const t = window.MOCK_TREND;
-  // If no trend data, render empty chart
-  if (!t.labels || !t.labels.length) {
+  // Use real trend data from API
+  const t = state.trend;
+
+  if (!t || !t.labels || !t.labels.length || t.gmv.every(v => v === 0)) {
     gmvChart = new Chart(canvas.getContext('2d'), {
       type: 'line',
       data: { labels: ['—'], datasets: [{ label: 'GMV', data: [0], borderColor: '#f97316', backgroundColor: 'transparent' }] },
@@ -468,13 +541,17 @@ function renderChart() {
     return;
   }
 
+  // Update period label
+  const periodLabel = { Last7d: '7 hari', Last30d: '30 hari', Month: 'Bulan Ini' }[state.period] || '30 hari';
+  document.getElementById('trendPeriod').textContent = periodLabel;
+
   gmvChart = new Chart(canvas.getContext('2d'), {
     type: 'line',
     data: {
       labels: t.labels,
       datasets: [
         {
-          label: 'GMV (juta)', data: t.gmv,
+          label: 'GMV (jt)', data: t.gmv,
           borderColor: '#f97316', backgroundColor: 'rgba(249,115,22,0.08)',
           fill: true, tension: 0.4, pointRadius: 4, pointBackgroundColor: '#f97316',
           pointBorderColor: '#0f172a', pointBorderWidth: 2,
@@ -491,15 +568,149 @@ function renderChart() {
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { position: 'top', align: 'end', labels: { color: '#94a3b8', boxWidth: 12, usePointStyle: true } },
-        tooltip: { backgroundColor: '#1e293b', titleColor: '#f1f5f9', bodyColor: '#cbd5e1', borderColor: '#334155', borderWidth: 1 }
+        tooltip: {
+          backgroundColor: '#1e293b', titleColor: '#f1f5f9', bodyColor: '#cbd5e1', borderColor: '#334155', borderWidth: 1,
+          callbacks: {
+            label: function(ctx) {
+              if (ctx.datasetIndex === 0) return 'GMV: Rp ' + (ctx.parsed.y * 1e6).toLocaleString('id-ID');
+              return 'Order: ' + ctx.parsed.y;
+            }
+          }
+        }
       },
       scales: {
         y: { beginAtZero: true, grid: { color: 'rgba(51,65,85,0.5)' }, ticks: { color: '#64748b', callback: v => v + 'jt' } },
         y1: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false }, ticks: { color: '#64748b' } },
-        x: { grid: { display: false }, ticks: { color: '#64748b' } }
+        x: { grid: { display: false }, ticks: { color: '#64748b', maxRotation: 45, autoSkip: true, maxTicksLimit: 15 } }
       }
     }
   });
+}
+
+// ---------- Goal Tracker ----------
+function renderGoals() {
+  const el = document.getElementById('goalList');
+  if (!el) return;
+
+  if (!state.goals.length) {
+    el.innerHTML = `
+      <div class="text-center py-6">
+        <i class="fas fa-bullseye text-2xl text-slate-700 mb-2"></i>
+        <p class="text-slate-500 text-xs">Belum ada goal</p>
+        <p class="text-slate-600 text-[10px] mt-1">Klik "Tambah Goal" untuk set target</p>
+      </div>`;
+    return;
+  }
+
+  // Calculate current progress from affiliates data
+  const d = state.affiliates;
+  const currentGmv = d.reduce((s, a) => s + Number(a.gmv || 0), 0);
+  const currentOrders = d.reduce((s, a) => s + Number(a.orders || 0), 0);
+  const currentCommission = d.reduce((s, a) => s + Number(a.commission || 0), 0);
+
+  el.innerHTML = state.goals.map(g => {
+    const gmvPct = Math.min(100, (currentGmv / g.target_gmv) * 100);
+    const orderPct = g.target_orders > 0 ? Math.min(100, (currentOrders / g.target_orders) * 100) : 0;
+    const commPct = g.target_commission > 0 ? Math.min(100, (currentCommission / g.target_commission) * 100) : 0;
+
+    const gmvColor = gmvPct >= 80 ? 'from-emerald-500 to-green-400' : gmvPct >= 50 ? 'from-amber-500 to-yellow-400' : 'from-red-500 to-pink-400';
+
+    return `
+      <div class="bg-slate-900/50 rounded-lg p-3">
+        <div class="flex items-center justify-between mb-2">
+          <p class="font-medium text-sm text-slate-100">${g.name}</p>
+          <div class="flex items-center gap-1">
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">${g.period || 'Month'}</span>
+            <button class="text-slate-600 hover:text-red-400 text-xs" onclick="deleteGoal(${g.id})"><i class="fas fa-trash"></i></button>
+          </div>
+        </div>
+
+        <!-- GMV Progress -->
+        <div class="mb-2">
+          <div class="flex items-center justify-between text-[10px] mb-1">
+            <span class="text-slate-500">GMV</span>
+            <span class="text-slate-400">${formatRupiah(currentGmv)} / ${formatRupiah(g.target_gmv)}</span>
+          </div>
+          <div class="h-2 bg-slate-800 rounded-full overflow-hidden">
+            <div class="h-full bg-gradient-to-r ${gmvColor} rounded-full transition-all duration-500" style="width:${gmvPct}%"></div>
+          </div>
+          <p class="text-right text-[10px] text-slate-500 mt-0.5">${gmvPct.toFixed(0)}%</p>
+        </div>
+
+        ${g.target_orders > 0 ? `
+        <!-- Orders Progress -->
+        <div class="mb-2">
+          <div class="flex items-center justify-between text-[10px] mb-1">
+            <span class="text-slate-500">Order</span>
+            <span class="text-slate-400">${currentOrders} / ${g.target_orders}</span>
+          </div>
+          <div class="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+            <div class="h-full bg-gradient-to-r from-blue-500 to-cyan-400 rounded-full transition-all duration-500" style="width:${orderPct}%"></div>
+          </div>
+        </div>` : ''}
+
+        ${g.target_commission > 0 ? `
+        <!-- Commission Progress -->
+        <div>
+          <div class="flex items-center justify-between text-[10px] mb-1">
+            <span class="text-slate-500">Komisi</span>
+            <span class="text-slate-400">${formatRupiah(currentCommission)} / ${formatRupiah(g.target_commission)}</span>
+          </div>
+          <div class="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+            <div class="h-full bg-gradient-to-r from-orange-500 to-amber-400 rounded-full transition-all duration-500" style="width:${commPct}%"></div>
+          </div>
+        </div>` : ''}
+      </div>`;
+  }).join('');
+}
+
+function showGoalModal() {
+  document.getElementById('goalModal').classList.remove('hidden');
+}
+
+function closeGoalModal() {
+  document.getElementById('goalModal').classList.add('hidden');
+  // Reset form
+  document.getElementById('goalName').value = '';
+  document.getElementById('goalGmv').value = '';
+  document.getElementById('goalOrders').value = '';
+  document.getElementById('goalCommission').value = '';
+  document.getElementById('goalPeriod').value = 'Month';
+}
+
+async function saveGoal() {
+  const name = document.getElementById('goalName').value.trim();
+  const targetGmv = Number(document.getElementById('goalGmv').value) || 0;
+  const targetOrders = Number(document.getElementById('goalOrders').value) || 0;
+  const targetCommission = Number(document.getElementById('goalCommission').value) || 0;
+  const period = document.getElementById('goalPeriod').value;
+
+  if (!name || !targetGmv) {
+    showToast('Nama goal dan target GMV wajib diisi', 'info');
+    return;
+  }
+
+  const res = await apiPost('/api/goals', {
+    name, target_gmv: targetGmv, target_orders: targetOrders,
+    target_commission: targetCommission, period
+  });
+
+  if (res?.success) {
+    showToast('Goal berhasil disimpan!', 'success');
+    closeGoalModal();
+    await loadGoals();
+  } else {
+    showToast('Gagal menyimpan goal', 'info');
+  }
+}
+
+async function deleteGoal(id) {
+  if (!confirm('Hapus goal ini?')) return;
+  const res = await apiDelete(`/api/goals/${id}`);
+  if (res?.success) {
+    showToast('Goal dihapus', 'success');
+    await loadGoals();
+  }
 }
 
 // ---------- Actions ----------
@@ -507,7 +718,10 @@ function switchTab(tab) {
   state.tab = tab;
   document.querySelectorAll('[data-tab]').forEach(el => el.classList.toggle('nav-active', el.dataset.tab === tab));
   document.querySelectorAll('[data-panel]').forEach(el => el.classList.toggle('hidden', el.dataset.panel !== tab));
-  if (tab === 'dashboard') setTimeout(renderChart, 40);
+  if (tab === 'dashboard') {
+    setTimeout(renderChart, 40);
+    loadGoals();
+  }
 }
 
 async function refreshAll() {
@@ -517,8 +731,7 @@ async function refreshAll() {
   if (btn) btn.disabled = true;
 
   await loadMode();
-  await Promise.all([loadShops(), loadAffiliates(), loadCampaigns()]);
-  renderChart();
+  await Promise.all([loadShops(), loadAffiliates(), loadCampaigns(), loadTrend(), loadGoals()]);
 
   if (icon) icon.classList.remove('fa-spin');
   if (btn) btn.disabled = false;
@@ -537,7 +750,7 @@ async function syncShop(shopId) {
   if (res?.error) showToast(res.error, 'info');
   else {
     showToast(`Synced ${res?.synced || 0} afiliator`, 'success');
-    await Promise.all([loadAffiliates(), loadShops()]);
+    await Promise.all([loadAffiliates(), loadShops(), loadTrend()]);
   }
 }
 
@@ -559,7 +772,7 @@ async function syncAllShops() {
   } else {
     const total = res?.total || 0;
     showToast(`Synced ${total} afiliator dari ${res?.shops?.length || 0} toko`, 'success');
-    await Promise.all([loadAffiliates(), loadCampaigns(), loadShops()]);
+    await Promise.all([loadAffiliates(), loadCampaigns(), loadShops(), loadTrend()]);
   }
 }
 
@@ -591,6 +804,7 @@ document.addEventListener('DOMContentLoaded', () => {
     state.shop = e.target.value;
     loadAffiliates();
     loadCampaigns();
+    loadTrend();
   });
   document.getElementById('channelSelect')?.addEventListener('change', e => {
     state.channel = e.target.value;
@@ -604,7 +818,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (syncRes?.total > 0) {
       showToast(`Synced ${syncRes.total} afiliator`, 'success');
     }
-    await loadAffiliates();
+    await Promise.all([loadAffiliates(), loadTrend(), loadGoals()]);
   });
   document.getElementById('searchInput')?.addEventListener('input', e => {
     state.search = e.target.value;

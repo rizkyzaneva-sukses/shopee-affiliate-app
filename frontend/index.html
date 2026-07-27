@@ -114,14 +114,66 @@
         <div class="card p-4"><div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Afiliator Aktif</span><div class="kpi-icon" style="background:rgba(34,197,94,.15);color:#4ade80"><i class="fas fa-user-check"></i></div></div><p class="text-xl font-bold text-slate-100" id="kpiActive">—</p></div>
       </div>
 
+      <!-- Trend Chart -->
       <div class="grid lg:grid-cols-3 gap-4">
         <div class="card p-4 lg:col-span-2">
-          <div class="flex items-center justify-between mb-3"><h3 class="text-sm font-semibold text-slate-200">Tren GMV Afiliasi</h3><span class="text-[10px] text-slate-600">30 hari</span></div>
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-semibold text-slate-200">Tren Harian</h3>
+            <span class="text-[10px] text-slate-600" id="trendPeriod">30 hari</span>
+          </div>
           <div style="height:240px"><canvas id="gmvChart"></canvas></div>
         </div>
-        <div class="card p-4"><h3 class="text-sm font-semibold text-slate-200 mb-3">Top 5 Afiliator</h3><div id="topAffiliates"></div></div>
+        <div class="card p-4"><h3 class="text-sm font-semibold text-slate-200 mb-3">🏆 Top 5 Afiliator</h3><div id="topAffiliates"></div></div>
       </div>
 
+      <!-- Goal Tracker + Quick Stats -->
+      <div class="grid lg:grid-cols-2 gap-4">
+        <!-- Goal Tracker -->
+        <div class="card p-4">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-semibold text-slate-200">🎯 Goal Tracker</h3>
+            <button class="btn btn-ghost text-xs" onclick="showGoalModal()"><i class="fas fa-plus"></i> Tambah Goal</button>
+          </div>
+          <div id="goalList" class="space-y-3"></div>
+        </div>
+
+        <!-- Quick Stats -->
+        <div class="card p-4">
+          <h3 class="text-sm font-semibold text-slate-200 mb-3">📊 Statistik Cepat</h3>
+          <div class="space-y-3" id="quickStats">
+            <div class="flex items-center justify-between p-3 bg-slate-900/50 rounded-lg">
+              <div class="flex items-center gap-2">
+                <div class="w-8 h-8 rounded-lg bg-emerald-500/15 flex items-center justify-center"><i class="fas fa-fire text-emerald-400 text-xs"></i></div>
+                <span class="text-xs text-slate-400">Avg Order Value</span>
+              </div>
+              <span class="text-sm font-semibold text-slate-100" id="statAov">—</span>
+            </div>
+            <div class="flex items-center justify-between p-3 bg-slate-900/50 rounded-lg">
+              <div class="flex items-center gap-2">
+                <div class="w-8 h-8 rounded-lg bg-blue-500/15 flex items-center justify-center"><i class="fas fa-mouse-pointer text-blue-400 text-xs"></i></div>
+                <span class="text-xs text-slate-400">Click-to-Order Rate</span>
+              </div>
+              <span class="text-sm font-semibold text-slate-100" id="statCvr">—</span>
+            </div>
+            <div class="flex items-center justify-between p-3 bg-slate-900/50 rounded-lg">
+              <div class="flex items-center gap-2">
+                <div class="w-8 h-8 rounded-lg bg-purple-500/15 flex items-center justify-center"><i class="fas fa-percentage text-purple-400 text-xs"></i></div>
+                <span class="text-xs text-slate-400">Avg Commission Rate</span>
+              </div>
+              <span class="text-sm font-semibold text-slate-100" id="statCommRate">—</span>
+            </div>
+            <div class="flex items-center justify-between p-3 bg-slate-900/50 rounded-lg">
+              <div class="flex items-center gap-2">
+                <div class="w-8 h-8 rounded-lg bg-orange-500/15 flex items-center justify-center"><i class="fas fa-user-plus text-orange-400 text-xs"></i></div>
+                <span class="text-xs text-slate-400">New Buyers</span>
+              </div>
+              <span class="text-sm font-semibold text-slate-100" id="statNewBuyers">—</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Affiliate Table -->
       <div class="card overflow-hidden">
         <div class="px-4 py-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
           <h3 class="text-sm font-semibold text-slate-200">Daftar Afiliator</h3>
@@ -208,6 +260,45 @@
       <div class="card p-4 text-xs text-slate-500 leading-relaxed">
         <i class="fas fa-info-circle text-orange-400 mr-1"></i>
         Token disimpan di PostgreSQL. "Cari Toko" menarik daftar toko dari Shopee Partner API. "Sync Semua" menarik data performa afiliator dari semua toko aktif.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Goal Modal -->
+<div id="goalModal" class="fixed inset-0 z-50 hidden" style="background:rgba(2,6,23,.85)">
+  <div class="flex items-center justify-center h-full p-4">
+    <div class="card p-6 w-full max-w-md">
+      <h3 class="text-base font-semibold text-slate-100 mb-4">Tambah Goal Baru</h3>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs text-slate-500 mb-1 block">Nama Goal</label>
+          <input id="goalName" type="text" class="input w-full" placeholder="Contoh: Target Bulan Juli" />
+        </div>
+        <div>
+          <label class="text-xs text-slate-500 mb-1 block">Target GMV (Rp)</label>
+          <input id="goalGmv" type="number" class="input w-full" placeholder="10000000" />
+        </div>
+        <div>
+          <label class="text-xs text-slate-500 mb-1 block">Target Order</label>
+          <input id="goalOrders" type="number" class="input w-full" placeholder="50" />
+        </div>
+        <div>
+          <label class="text-xs text-slate-500 mb-1 block">Target Komisi (Rp)</label>
+          <input id="goalCommission" type="number" class="input w-full" placeholder="500000" />
+        </div>
+        <div>
+          <label class="text-xs text-slate-500 mb-1 block">Periode</label>
+          <select id="goalPeriod" class="select w-full">
+            <option value="Month">Bulan Ini</option>
+            <option value="Last30d">30 Hari</option>
+            <option value="Last7d">7 Hari</option>
+          </select>
+        </div>
+      </div>
+      <div class="flex gap-2 mt-5">
+        <button class="btn btn-ghost flex-1" onclick="closeGoalModal()">Batal</button>
+        <button class="btn btn-primary flex-1" onclick="saveGoal()">Simpan Goal</button>
       </div>
     </div>
   </div>
