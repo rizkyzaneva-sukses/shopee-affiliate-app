@@ -292,6 +292,14 @@ function updateKPI() {
   document.getElementById('kpiRoi').textContent = roi.toFixed(1) + 'x';
   document.getElementById('kpiClicks').textContent = formatNumber(clicks);
   document.getElementById('kpiActive').textContent = active + ' / ' + d.length;
+
+  // Item Sold
+  const itemsSold = d.reduce((s, a) => s + Number(a.items_sold || a.total_buyers || 0), 0);
+  document.getElementById('kpiItemSold').textContent = formatNumber(itemsSold);
+
+  // Avg Commission Rate
+  const commRate = gmv > 0 ? (commission / gmv * 100) : 0;
+  document.getElementById('kpiCommRate').textContent = commRate.toFixed(1) + '%';
 }
 
 function updateQuickStats() {
