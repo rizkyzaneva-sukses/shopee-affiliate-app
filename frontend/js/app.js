@@ -805,6 +805,267 @@ async function runCalculator() {
   document.getElementById('calcCommTarget').textContent = formatRupiah(res.target.commission);
 }
 
+// ---------- Products ----------
+async function loadProducts() {
+  const btn = document.getElementById('btnSyncProducts');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Memuat...'; }
+
+  const params = new URLSearchParams();
+  if (state.shop !== 'all') params.set('shop_id', state.shop);
+
+  const res = await apiGet('/api/products?' + params.toString());
+
+  if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sync-alt text-xs"></i> Muat Produk'; }
+
+  const data = res?.data || [];
+  renderProductStats(data);
+  renderProductTable(data);
+}
+
+function renderProductStats(products) {
+  const el = document.getElementById('productStats');
+  if (!el) return;
+
+  const totalProducts = products.length;
+  const totalGmv = products.reduce((s, p) => s + Number(p.sales_amount || p.gmv || 0), 0);
+  const totalOrders = products.reduce((s, p) => s + Number(p.order_count || p.orders || 0), 0);
+  const avgCommRate = products.length > 0
+    ? products.reduce((s, p) => s + Number(p.commission_rate || 0), 0) / products.length
+    : 0;
+
+  el.innerHTML = `
+    <div class="card p-4">
+      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total Produk</span><div class="kpi-icon" style="background:rgba(59,130,246,.15);color:#60a5fa"><i class="fas fa-box"></i></div></div>
+      <p class="text-xl font-bold text-slate-100">${totalProducts}</p>
+    </div>
+    <div class="card p-4">
+      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total GMV</span><div class="kpi-icon" style="background:rgba(16,185,129,.15);color:#34d399"><i class="fas fa-money-bill-wave"></i></div></div>
+      <p class="text-xl font-bold text-slate-100">${formatRupiah(totalGmv)}</p>
+    </div>
+    <div class="card p-4">
+      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total Order</span><div class="kpi-icon" style="background:var(--orange-dim);color:#fb923c"><i class="fas fa-shopping-bag"></i></div></div>
+      <p class="text-xl font-bold text-slate-100">${formatNumber(totalOrders)}</p>
+    </div>
+    <div class="card p-4">
+      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Avg Komisi Rate</span><div class="kpi-icon" style="background:rgba(168,85,247,.15);color:#c084fc"><i class="fas fa-percentage"></i></div></div>
+      <p class="text-xl font-bold text-slate-100">${avgCommRate.toFixed(1)}%</p>
+    </div>`;
+}
+
+function renderProductTable(products) {
+  const tbody = document.getElementById('productTable');
+  if (!tbody) return;
+
+  if (!products.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="text-center py-12">
+      <div class="flex flex-col items-center gap-3">
+        <i class="fas fa-box text-3xl text-slate-700"></i>
+        <p class="text-slate-400 text-sm">Belum ada data produk</p>
+        <p class="text-xs text-slate-600">Klik "Muat Produk" untuk mengambil dari Shopee AMS</p>
+      </div>
+    </td></tr>`;
+    return;
+  }
+
+  // Sort by GMV/sales descending
+  const sorted = products.sort((a, b) => Number(b.sales_amount || b.gmv || 0) - Number(a.sales_amount || a.gmv || 0));
+
+  tbody.innerHTML = sorted.map((p, i) => {
+    const gmv = Number(p.sales_amount || p.gmv || 0);
+    const orders = Number(p.order_count || p.orders || 0);
+    const commRate = Number(p.commission_rate || 0);
+    const price = Number(p.price || p.min_price || 0);
+    const estComm = gmv * (commRate / 100);
+    const productName = p.product_name || p.name || p.item_name || '-';
+    const category = p.category_name || p.category || '-';
+    const img = p.image || p.img || p.image_url || '';
+
+    return `<tr class="table-row">
+      <td class="td-rank">${i + 1}</td>
+      <td>
+        <div class="flex items-center gap-3">
+          ${img ? '<img src="' + img + '" class="w-10 h-10 rounded object-cover bg-slate-800" onerror="this.style.display=\'none\'" />' : '<div class="w-10 h-10 rounded bg-slate-800 flex items-center justify-center text-slate-600 text-xs"><i class="fas fa-box"></i></div>'}
+          <div class="min-w-0">
+            <p class="font-medium text-slate-100 truncate max-w-[200px]">${productName}</p>
+            <p class="text-xs text-slate-500">ID: ${p.item_id || p.product_id || '-'}</p>
+          </div>
+        </div>
+      </td>
+      <td class="text-xs text-slate-400">${category}</td>
+      <td class="text-right text-slate-300">${formatRupiah(price)}</td>
+      <td class="text-right"><span class="text-emerald-400 font-medium">${commRate.toFixed(1)}%</span></td>
+      <td class="text-right font-medium text-orange-400">${formatRupiah(estComm)}</td>
+      <td class="text-right font-medium text-slate-100">${formatRupiah(gmv)}</td>
+      <td class="text-right text-slate-300">${formatNumber(orders)}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ---------- Transactions ----------
+let allTransactions = [];
+
+async function loadTransactions() {
+  const params = new URLSearchParams();
+  if (state.shop !== 'all') params.set('shop_id', state.shop);
+  params.set('period', state.period);
+
+  const res = await apiGet('/api/transactions?' + params.toString());
+  allTransactions = res?.data || [];
+
+  renderTxStats(allTransactions);
+  renderTxTable(allTransactions);
+}
+
+function renderTxStats(txs) {
+  const el = document.getElementById('txStats');
+  if (!el) return;
+
+  const totalTxs = txs.length;
+  const totalGmv = txs.reduce((s, t) => s + Number(t.payment_amount || t.gmv || t.amount || 0), 0);
+  const totalComm = txs.reduce((s, t) => s + Number(t.estimated_commission || t.commission || 0), 0);
+  const completed = txs.filter(t => String(t.status).toLowerCase().includes('confirm') || t.order_status === 3).length;
+
+  el.innerHTML = `
+    <div class="card p-4">
+      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total Transaksi</span><div class="kpi-icon" style="background:rgba(59,130,246,.15);color:#60a5fa"><i class="fas fa-receipt"></i></div></div>
+      <p class="text-xl font-bold text-slate-100">${totalTxs}</p>
+    </div>
+    <div class="card p-4">
+      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total GMV</span><div class="kpi-icon" style="background:rgba(16,185,129,.15);color:#34d399"><i class="fas fa-money-bill-wave"></i></div></div>
+      <p class="text-xl font-bold text-slate-100">${formatRupiah(totalGmv)}</p>
+    </div>
+    <div class="card p-4">
+      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total Komisi</span><div class="kpi-icon" style="background:var(--orange-dim);color:#fb923c"><i class="fas fa-coins"></i></div></div>
+      <p class="text-xl font-bold text-slate-100">${formatRupiah(totalComm)}</p>
+    </div>
+    <div class="card p-4">
+      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Terkonfirmasi</span><div class="kpi-icon" style="background:rgba(34,197,94,.15);color:#4ade80"><i class="fas fa-check-circle"></i></div></div>
+      <p class="text-xl font-bold text-slate-100">${completed} / ${totalTxs}</p>
+    </div>`;
+}
+
+function renderTxTable(txs) {
+  const tbody = document.getElementById('txTable');
+  if (!tbody) return;
+
+  if (!txs.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="text-center py-12">
+      <div class="flex flex-col items-center gap-3">
+        <i class="fas fa-receipt text-3xl text-slate-700"></i>
+        <p class="text-slate-400 text-sm">Belum ada data transaksi</p>
+        <p class="text-xs text-slate-600">Klik "Muat Transaksi" untuk mengambil dari Shopee AMS</p>
+      </div>
+    </td></tr>`;
+    return;
+  }
+
+  const statusMap = {
+    1: { cls: 'status-warning', text: 'Pending' },
+    2: { cls: 'status-warning', text: 'Shipping' },
+    3: { cls: 'status-active', text: 'Selesai' },
+    4: { cls: 'status-inactive', text: 'Cancelled' },
+    5: { cls: 'status-inactive', text: 'Return' },
+  };
+
+  tbody.innerHTML = txs.map(t => {
+    const status = statusMap[t.order_status] || { cls: 'status-inactive', text: t.status || 'Unknown' };
+    const amount = Number(t.payment_amount || t.gmv || t.amount || 0);
+    const comm = Number(t.estimated_commission || t.commission || 0);
+
+    return `<tr class="table-row">
+      <td class="font-mono text-xs text-slate-300">${t.order_id || t.sn || '-'}</td>
+      <td class="text-slate-300">${t.affiliate_name || t.username || '-'}</td>
+      <td class="text-slate-300 truncate max-w-[180px]">${t.item_name || t.product_name || '-'}</td>
+      <td class="text-right text-slate-100">${formatRupiah(amount)}</td>
+      <td class="text-right font-medium text-orange-400">${formatRupiah(comm)}</td>
+      <td class="text-center"><span class="status-badge ${status.cls}">${status.text}</span></td>
+      <td class="text-xs text-slate-500">${t.order_time || t.create_time || '-'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function exportTxCSV() {
+  if (!allTransactions.length) {
+    showToast('Muat transaksi dulu', 'info');
+    return;
+  }
+  const header = 'Order ID,Afiliator,Produk,Harga,Komisi,Status,Tanggal';
+  const rows = allTransactions.map(t =>
+    `"${t.order_id || t.sn || ''}","${t.affiliate_name || t.username || ''}","${(t.item_name || t.product_name || '').replace(/"/g, '""')}",${Number(t.payment_amount || t.gmv || t.amount || 0)},${Number(t.estimated_commission || t.commission || 0)},"${t.status || ''}","${t.order_time || t.create_time || ''}"`
+  );
+  const csv = [header, ...rows].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'transactions-' + new Date().toISOString().slice(0,10) + '.csv';
+  a.click(); URL.revokeObjectURL(url);
+  showToast('Export transaksi berhasil', 'success');
+}
+
+// ---------- Period Comparison ----------
+async function loadComparison() {
+  const params = new URLSearchParams();
+  if (state.shop !== 'all') params.set('shop_id', state.shop);
+
+  const res = await apiGet('/api/dashboard/compare?' + params.toString());
+  if (!res || res.error) return;
+
+  const section = document.getElementById('comparisonSection');
+  const content = document.getElementById('comparisonContent');
+  if (!section || !content) return;
+
+  const comp = res.comparison || {};
+  const periods = res.periods || {};
+  const insights = res.insight || [];
+
+  // Only show if we have data
+  const r30 = periods['Last30d'] || {};
+  if (!r30.gmv && !r30.orders) {
+    section.classList.add('hidden');
+    return;
+  }
+
+  section.classList.remove('hidden');
+
+  const trendIcon = (dir) => dir === 'up' ? '📈' : dir === 'down' ? '📉' : '➡️';
+  const trendColor = (dir) => dir === 'up' ? 'text-emerald-400' : dir === 'down' ? 'text-red-400' : 'text-slate-400';
+  const trendBg = (dir) => dir === 'up' ? 'bg-emerald-500/10' : dir === 'down' ? 'bg-red-500/10' : 'bg-slate-500/10';
+
+  const r7 = periods['Last7d'] || {};
+  const r7ext = periods['Last7d_extrapolated'] || {};
+
+  content.innerHTML = `
+    <div class="grid grid-cols-3 gap-4 mb-4">
+      <div class="${trendBg(comp.gmv?.direction)} rounded-lg p-4 text-center">
+        <p class="text-xs text-slate-500 mb-1">GMV</p>
+        <p class="text-lg font-bold text-slate-100">${trendIcon(comp.gmv?.direction)} ${Math.abs(comp.gmv?.change_pct || 0)}%</p>
+        <div class="flex justify-between text-[10px] text-slate-500 mt-2">
+          <span>7h: ${formatRupiah(r7ext.gmv)}</span>
+          <span>30h: ${formatRupiah(r30.gmv)}</span>
+        </div>
+      </div>
+      <div class="${trendBg(comp.orders?.direction)} rounded-lg p-4 text-center">
+        <p class="text-xs text-slate-500 mb-1">Order</p>
+        <p class="text-lg font-bold text-slate-100">${trendIcon(comp.orders?.direction)} ${Math.abs(comp.orders?.change_pct || 0)}%</p>
+        <div class="flex justify-between text-[10px] text-slate-500 mt-2">
+          <span>7h: ${Math.round(r7ext.orders || 0)}</span>
+          <span>30h: ${r30.orders || 0}</span>
+        </div>
+      </div>
+      <div class="${trendBg(comp.commission?.direction)} rounded-lg p-4 text-center">
+        <p class="text-xs text-slate-500 mb-1">Komisi</p>
+        <p class="text-lg font-bold text-slate-100">${trendIcon(comp.commission?.direction)} ${Math.abs(comp.commission?.change_pct || 0)}%</p>
+        <div class="flex justify-between text-[10px] text-slate-500 mt-2">
+          <span>7h: ${formatRupiah(r7ext.commission)}</span>
+          <span>30h: ${formatRupiah(r30.commission)}</span>
+        </div>
+      </div>
+    </div>
+    ${insights.length ? '<div class="space-y-1">' + insights.map(i => '<p class="text-xs text-slate-400">' + i + '</p>').join('') + '</div>' : ''}
+  `;
+}
+
+
 // ---------- Actions ----------
 function switchTab(tab) {
   state.tab = tab;
@@ -813,7 +1074,10 @@ function switchTab(tab) {
   if (tab === 'dashboard') {
     setTimeout(renderChart, 40);
     loadGoals();
+    loadComparison();
   }
+  if (tab === 'products') loadProducts();
+  if (tab === 'transactions') loadTransactions();
 }
 
 async function refreshAll() {
@@ -823,7 +1087,7 @@ async function refreshAll() {
   if (btn) btn.disabled = true;
 
   await loadMode();
-  await Promise.all([loadShops(), loadAffiliates(), loadCampaigns(), loadTrend(), loadGoals(), checkAlerts()]);
+  await Promise.all([loadShops(), loadAffiliates(), loadCampaigns(), loadTrend(), loadGoals(), checkAlerts(), loadComparison()]);
 
   if (icon) icon.classList.remove('fa-spin');
   if (btn) btn.disabled = false;

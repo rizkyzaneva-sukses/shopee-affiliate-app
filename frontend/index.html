@@ -66,6 +66,8 @@
     <nav class="flex-1 p-3 space-y-1 mt-2">
       <a href="#" class="nav-item nav-active" data-tab="dashboard"><i class="fas fa-chart-pie"></i> Dashboard</a>
       <a href="#" class="nav-item" data-tab="affiliates"><i class="fas fa-users"></i> Afiliator</a>
+      <a href="#" class="nav-item" data-tab="products"><i class="fas fa-box"></i> Produk</a>
+      <a href="#" class="nav-item" data-tab="transactions"><i class="fas fa-receipt"></i> Transaksi</a>
       <a href="#" class="nav-item" data-tab="campaigns"><i class="fas fa-bullhorn"></i> Campaign</a>
       <a href="#" class="nav-item" data-tab="shops"><i class="fas fa-store"></i> Toko Saya</a>
     </nav>
@@ -178,6 +180,17 @@
         </div>
       </div>
 
+      <!-- Period Comparison -->
+      <div id="comparisonSection" class="hidden">
+        <div class="card p-4">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-semibold text-slate-200">📊 Perbandingan Periode (7 Hari vs 30 Hari)</h3>
+            <span class="text-[10px] text-slate-600">Extrapolasi 7 hari → 30 hari</span>
+          </div>
+          <div id="comparisonContent"></div>
+        </div>
+      </div>
+
       <!-- Affiliate Table -->
       <div class="card overflow-hidden">
         <div class="px-4 py-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
@@ -239,6 +252,66 @@
       </div>
     </div>
 
+    <!-- Products -->
+    <div data-panel="products" class="p-5 hidden space-y-4">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-semibold text-slate-200">Produk Terbaik</h3>
+        <div class="flex gap-2">
+          <button id="btnSyncProducts" class="btn btn-ghost" onclick="loadProducts()"><i class="fas fa-sync-alt text-xs"></i> Muat Produk</button>
+        </div>
+      </div>
+      <p class="text-xs text-slate-500">Produk dari Shopee AMS yang tersedia untuk dipromosikan afiliator.</p>
+      <div id="productStats" class="grid grid-cols-2 lg:grid-cols-4 gap-3"></div>
+      <div class="card overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-left text-xs text-slate-500 border-b border-slate-800">
+                <th class="px-4 py-2.5 font-medium">#</th>
+                <th class="px-4 py-2.5 font-medium">Produk</th>
+                <th class="px-4 py-2.5 font-medium">Kategori</th>
+                <th class="px-4 py-2.5 font-medium text-right">Harga</th>
+                <th class="px-4 py-2.5 font-medium text-right">Komisi Rate</th>
+                <th class="px-4 py-2.5 font-medium text-right">Est. Komisi</th>
+                <th class="px-4 py-2.5 font-medium text-right">GMV</th>
+                <th class="px-4 py-2.5 font-medium text-right">Order</th>
+              </tr>
+            </thead>
+            <tbody id="productTable"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <!-- Transactions -->
+    <div data-panel="transactions" class="p-5 hidden space-y-4">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-semibold text-slate-200">Detail Transaksi</h3>
+        <div class="flex gap-2">
+          <button class="btn btn-ghost" onclick="loadTransactions()"><i class="fas fa-sync-alt text-xs"></i> Muat Transaksi</button>
+          <button class="btn btn-ghost" onclick="exportTxCSV()"><i class="fas fa-download text-xs"></i> Export</button>
+        </div>
+      </div>
+      <p class="text-xs text-slate-500">Transaksi individual dari Shopee AMS — detail order, komisi, status.</p>
+      <div id="txStats" class="grid grid-cols-2 lg:grid-cols-4 gap-3"></div>
+      <div class="card overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-left text-xs text-slate-500 border-b border-slate-800">
+                <th class="px-4 py-2.5 font-medium">Order ID</th>
+                <th class="px-4 py-2.5 font-medium">Afiliator</th>
+                <th class="px-4 py-2.5 font-medium">Produk</th>
+                <th class="px-4 py-2.5 font-medium text-right">Harga</th>
+                <th class="px-4 py-2.5 font-medium text-right">Komisi</th>
+                <th class="px-4 py-2.5 font-medium text-center">Status</th>
+                <th class="px-4 py-2.5 font-medium">Tanggal</th>
+              </tr>
+            </thead>
+            <tbody id="txTable"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
     <!-- Campaigns -->
     <div data-panel="campaigns" class="p-5 hidden space-y-4">
       <div class="flex items-center justify-between">

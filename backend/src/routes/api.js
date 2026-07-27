@@ -890,6 +890,205 @@ router.get('/campaigns/sync-all', async (_req, res) => {
 });
 
 
+
+// ---------- Products (from Shopee API) ----------
+router.get('/products', async (req, res) => {
+  try {
+    const shopId = req.query.shop_id;
+    const mode = process.env.APP_MODE || 'mock';
+    if (mode !== 'live') {
+      return res.json({ data: [], source: 'mock' });
+    }
+
+    if (!shopId || shopId === 'all') {
+      // Get first active shop
+      const { rows: shops } = await query(`SELECT * FROM shops WHERE status = 'active' LIMIT 1`);
+      if (!shops.length) return res.json({ data: [], source: 'empty' });
+      var shop = shops[0];
+    } else {
+      const { rows: shops } = await query(`SELECT * FROM shops WHERE shop_id = $1`, [shopId]);
+      if (!shops.length) return res.json({ data: [], source: 'empty' });
+      var shop = shops[0];
+    }
+
+    const token = await shopee.ensureValidToken(shop);
+    
+    // Fetch all pages of products
+    let allProducts = [];
+    let pageNo = 1;
+    while (pageNo <= 10) { // safety limit
+      try {
+        const data = await shopee.getProductList(shop.shop_id, token, { pageNo, pageSize: 50 });
+        const list = data.response?.list || data.response?.product_list || [];
+        allProducts.push(...list);
+        const more = data.response?.more ?? data.response?.has_next_page;
+        if (more === false || list.length < 50) break;
+        pageNo++;
+      } catch (e) {
+        // API might not support this endpoint
+        console.warn('[PRODUCTS] Error fetching page', pageNo, ':', e.message);
+        break;
+      }
+    }
+
+    res.json({ data: allProducts, source: 'live', count: allProducts.length });
+  } catch (e) {
+    res.json({ data: [], source: 'error', error: e.message });
+  }
+});
+
+// ---------- Transactions (from Shopee API) ----------
+router.get('/transactions', async (req, res) => {
+  try {
+    const shopId = req.query.shop_id;
+    const period = req.query.period || 'Last30d';
+    const mode = process.env.APP_MODE || 'mock';
+    
+    if (mode !== 'live') {
+      return res.json({ data: [], source: 'mock' });
+    }
+
+    // Get shop
+    let shop;
+    if (shopId && shopId !== 'all') {
+      const { rows: shops } = await query(`SELECT * FROM shops WHERE shop_id = $1`, [shopId]);
+      shop = shops[0];
+    } else {
+      const { rows: shops } = await query(`SELECT * FROM shops WHERE status = 'active' LIMIT 1`);
+      shop = shops[0];
+    }
+    
+    if (!shop) return res.json({ data: [], source: 'empty' });
+
+    const token = await shopee.ensureValidToken(shop);
+    const { startDate, endDate } = periodRange(period);
+
+    // Fetch all pages of transactions
+    let allTransactions = [];
+    let pageNo = 1;
+    while (pageNo <= 10) {
+      try {
+        const data = await shopee.getPerformanceList(shop.shop_id, token, {
+          periodType: period, startDate, endDate, pageNo, pageSize: 50
+        });
+        const list = data.response?.list || data.response?.performance_list || [];
+        allTransactions.push(...list);
+        const more = data.response?.more ?? data.response?.has_next_page;
+        if (more === false || list.length < 50) break;
+        pageNo++;
+      } catch (e) {
+        console.warn('[TRANSACTIONS] Error fetching page', pageNo, ':', e.message);
+        break;
+      }
+    }
+
+    res.json({ data: allTransactions, source: 'live', count: allTransactions.length });
+  } catch (e) {
+    res.json({ data: [], source: 'error', error: e.message });
+  }
+});
+
+// ---------- Period Comparison ----------
+router.get('/dashboard/compare', async (req, res) => {
+  try {
+    const shopId = req.query.shop_id;
+    
+    // Get data for both periods
+    const periods = ['Last7d', 'Last30d'];
+    const results = {};
+    
+    for (const period of periods) {
+      let sql = `
+        SELECT
+          COALESCE(SUM(gmv), 0) AS total_gmv,
+          COALESCE(SUM(orders), 0) AS total_orders,
+          COALESCE(SUM(est_commission), 0) AS total_commission,
+          COALESCE(SUM(clicks), 0) AS total_clicks,
+          COUNT(DISTINCT affiliate_id) AS affiliate_count
+        FROM affiliate_performance
+        WHERE period_type = $1
+      `;
+      const params = [period];
+      
+      if (shopId && shopId !== 'all') {
+        sql += ` AND shop_id = $2`;
+        params.push(shopId);
+      }
+      
+      const { rows } = await query(sql, params);
+      const s = rows[0] || {};
+      results[period] = {
+        gmv: Number(s.total_gmv || 0),
+        orders: Number(s.total_orders || 0),
+        commission: Number(s.total_commission || 0),
+        clicks: Number(s.total_clicks || 0),
+        affiliates: Number(s.affiliate_count || 0),
+      };
+    }
+
+    // Calculate changes
+    const r7 = results['Last7d'] || {};
+    const r30 = results['Last30d'] || {};
+    
+    // Extrapolate 7d to 30d for fair comparison
+    const r7ext = {
+      gmv: r7.gmv * (30/7),
+      orders: r7.orders * (30/7),
+      commission: r7.commission * (30/7),
+      clicks: r7.clicks * (30/7),
+    };
+
+    const pctChange = (curr, prev) => {
+      if (prev === 0) return curr > 0 ? 100 : 0;
+      return ((curr - prev) / prev * 100);
+    };
+
+    res.json({
+      periods: {
+        'Last7d': r7,
+        'Last30d': r30,
+        'Last7d_extrapolated': r7ext,
+      },
+      comparison: {
+        gmv: {
+          change_pct: Number(pctChange(r7ext.gmv, r30.gmv).toFixed(1)),
+          direction: r7ext.gmv > r30.gmv ? 'up' : r7ext.gmv < r30.gmv ? 'down' : 'flat'
+        },
+        orders: {
+          change_pct: Number(pctChange(r7ext.orders, r30.orders).toFixed(1)),
+          direction: r7ext.orders > r30.orders ? 'up' : r7ext.orders < r30.orders ? 'down' : 'flat'
+        },
+        commission: {
+          change_pct: Number(pctChange(r7ext.commission, r30.commission).toFixed(1)),
+          direction: r7ext.commission > r30.commission ? 'up' : r7ext.commission < r30.commission ? 'down' : 'flat'
+        },
+      },
+      insight: generateInsight(r7ext, r30)
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Generate human-readable insight from comparison */
+function generateInsight(r7ext, r30) {
+  const insights = [];
+  const gmvChange = r30.gmv > 0 ? ((r7ext.gmv - r30.gmv) / r30.gmv * 100) : 0;
+  const commChange = r30.commission > 0 ? ((r7ext.commission - r30.commission) / r30.commission * 100) : 0;
+  const orderChange = r30.orders > 0 ? ((r7ext.orders - r30.orders) / r30.orders * 100) : 0;
+
+  if (gmvChange > 10) insights.push('📈 GMV tren naik ' + Math.abs(gmvChange).toFixed(0) + '% — performa membaik');
+  else if (gmvChange < -10) insights.push('📉 GMV tren turun ' + Math.abs(gmvChange).toFixed(0) + '% — perlu perhatian');
+  else insights.push('➡️ GMV stabil');
+
+  if (commChange > 15) insights.push('💰 Komisi naik lebih cepat dari GMV — efisiensi meningkat');
+  else if (commChange < -15) insights.push('⚠️ Komisi turun — cek rate komisi atau produk');
+
+  if (orderChange > 10 && gmvChange < 5) insights.push('🛒 Order naik tapi GMV flat — avg order value turun');
+
+  return insights;
+}
+
 // ---------- Alerts (anomaly detection) ----------
 router.get('/alerts', async (req, res) => {
   try {

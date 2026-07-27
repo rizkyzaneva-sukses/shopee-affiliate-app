@@ -411,6 +411,79 @@ async function ensureValidToken(shop) {
   return result.access_token;
 }
 
+
+// ---------- Product & Transaction APIs ----------
+
+/**
+ * Get products available for affiliate promotion
+ */
+async function getProductList(shopId, accessToken, opts = {}) {
+  const { pageNo = 1, pageSize = getPageSize(), keyword, sortOrder } = opts;
+  const queryParams = {
+    page_no: pageNo,
+    page_size: Math.min(Number(pageSize) || getPageSize(), 50),
+  };
+  if (keyword) queryParams.keyword = keyword;
+  if (sortOrder) queryParams.sort_order = sortOrder;
+
+  return shopeeRequest({
+    method: 'GET',
+    path: '/api/v2/ams/get_product_list',
+    shopId,
+    accessToken,
+    queryParams,
+  });
+}
+
+/**
+ * Get detailed performance/transaction list (order-level)
+ */
+async function getPerformanceList(shopId, accessToken, opts = {}) {
+  const {
+    periodType = 'Last30d',
+    startDate,
+    endDate,
+    channel = 'AllChannel',
+    orderType = 'ConfirmedOrder',
+    pageNo = 1,
+    pageSize = getPageSize(),
+  } = opts;
+
+  const queryParams = {
+    period_type: periodType,
+    channel: normalizeChannel(channel),
+    order_type: orderType,
+    page_no: pageNo,
+    page_size: Math.min(Number(pageSize) || getPageSize(), 50),
+  };
+  if (startDate) queryParams.start_date = startDate;
+  if (endDate) queryParams.end_date = endDate;
+
+  return shopeeRequest({
+    method: 'GET',
+    path: '/api/v2/ams/get_performance_list',
+    shopId,
+    accessToken,
+    queryParams,
+  });
+}
+
+/**
+ * Get available offers from the marketplace
+ */
+async function getOfferList(shopId, accessToken, opts = {}) {
+  const { pageNo = 1, pageSize = getPageSize() } = opts;
+  return shopeeRequest({
+    method: 'GET',
+    path: '/api/v2/ams/get_offer_list',
+    shopId,
+    accessToken,
+    queryParams: {
+      page_no: pageNo,
+      page_size: Math.min(Number(pageSize) || getPageSize(), 50),
+    },
+  });
+}
 module.exports = {
   getConfig,
   assertCredentials,
@@ -427,6 +500,9 @@ module.exports = {
   probePageSizes,
   getManagedAffiliateList,
   getManagedCampaignList,
+  getProductList,
+  getPerformanceList,
+  getOfferList,
   refreshAccessToken,
   ensureValidToken,
 };
