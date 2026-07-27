@@ -379,11 +379,12 @@ router.get('/affiliates', async (req, res) => {
       }
     }
 
-    // Fallback: cached DB or mock
+    // Fallback: cached DB
+    // Use period_type filter if data exists for it, otherwise fall back to most recent
     let sql = `
-      SELECT a.affiliate_id, a.name, a.username, a.channel, a.status, a.followers,
-             a.shop_id, a.last_active_at,
-             COALESCE(a.channel, p.channel) AS channel_resolved,
+      SELECT a.affiliate_id, a.name, a.username,
+             COALESCE(a.channel, p.channel) AS channel,
+             a.status, a.followers, a.shop_id, a.last_active_at,
              COALESCE(p.gmv, 0) AS gmv,
              COALESCE(p.orders, 0) AS orders,
              COALESCE(p.clicks, 0) AS clicks,
@@ -394,13 +395,14 @@ router.get('/affiliates', async (req, res) => {
         SELECT * FROM affiliate_performance ap
         WHERE ap.affiliate_id = a.affiliate_id
           AND ap.shop_id = a.shop_id
+          AND ap.period_type = $1
         ORDER BY ap.synced_at DESC LIMIT 1
       ) p ON true
       WHERE 1=1
     `;
-    // User filters start from $1.
-    const params = [];
-    let idx = 1;
+    // $1 is the period filter above; user filters continue from $2.
+    const params = [period];
+    let idx = 2;
 
     if (shopId && shopId !== 'all') {
       sql += ` AND a.shop_id = $${idx++}`;
@@ -449,14 +451,15 @@ router.get('/campaigns', async (req, res) => {
 router.get('/dashboard/summary', async (req, res) => {
   try {
     const shopId = req.query.shop_id;
+    const period = req.query.period || 'Last30d';
     const channel = req.query.channel && req.query.channel !== 'all'
       ? req.query.channel
       : 'AllChannel';
 
     // Aggregate over the newest snapshot per affiliate only. Summing the raw
     // table would double count: it holds one row per period/channel/date range.
-    const params = [channel];
-    let filter = `WHERE channel = $1`;
+    const params = [period, channel];
+    let filter = `WHERE period_type = $1 AND channel = $2`;
     if (shopId && shopId !== 'all') {
       params.push(shopId);
       filter += ` AND shop_id = $${params.length}`; 

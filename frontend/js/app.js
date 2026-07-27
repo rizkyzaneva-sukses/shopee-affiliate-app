@@ -596,9 +596,15 @@ document.addEventListener('DOMContentLoaded', () => {
     state.channel = e.target.value;
     loadAffiliates();
   });
-  document.getElementById('periodSelect')?.addEventListener('change', e => {
+  document.getElementById('periodSelect')?.addEventListener('change', async (e) => {
     state.period = e.target.value;
-    loadAffiliates();
+    // Auto-sync all shops for the new period, then reload
+    showToast('Sync data untuk periode ' + e.target.options[e.target.selectedIndex].text + '...', 'info');
+    const syncRes = await apiPost('/api/sync/all', { period: state.period });
+    if (syncRes?.total > 0) {
+      showToast(`Synced ${syncRes.total} afiliator`, 'success');
+    }
+    await loadAffiliates();
   });
   document.getElementById('searchInput')?.addEventListener('input', e => {
     state.search = e.target.value;
