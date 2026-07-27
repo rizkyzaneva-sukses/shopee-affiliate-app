@@ -248,7 +248,7 @@ router.post('/sync/all', async (req, res) => {
         const channel = shopee.normalizeChannel(req.body?.channel);
         const { startDate, endDate } = periodRange(periodType);
 
-        const list = await shopee.getAllAffiliatePerformance(shop.shop_id, token, { periodType, channel });
+        const list = await shopee.getAllAffiliatePerformance(shop.shop_id, token, { periodType, channel, startDate, endDate });
         let count = 0;
 
         for (const a of list) {
@@ -518,6 +518,8 @@ router.post('/sync/:shopId', async (req, res) => {
     const list = await shopee.getAllAffiliatePerformance(shopId, token, {
       periodType,
       channel,
+      startDate,
+      endDate,
     });
     let upserted = 0;
 
