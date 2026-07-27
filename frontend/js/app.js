@@ -97,12 +97,24 @@ function requireLogin() {
   });
 }
 
+let configErrorShown = false;
+
 async function apiGet(path) {
   try {
     const res = await fetch(`${API}${path}`, { headers: authHeaders() });
     if (res.status === 401) {
       clearAdminToken();
       requireLogin();
+      return null;
+    }
+    if (res.status === 503) {
+      // Server misconfigured (e.g. ADMIN_TOKEN unset). Surface it once instead
+      // of silently falling back to mock data, which looks like it "works".
+      const body = await res.json().catch(() => ({}));
+      if (!configErrorShown) {
+        configErrorShown = true;
+        showToast(body.error || 'Server belum dikonfigurasi.', 'info');
+      }
       return null;
     }
     if (!res.ok) throw new Error(res.statusText);

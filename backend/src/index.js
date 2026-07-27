@@ -5,6 +5,7 @@ const helmet = require('helmet');
 const compression = require('compression');
 const morgan = require('morgan');
 const path = require('path');
+const fs = require('fs');
 const apiRoutes = require('./routes/api');
 const { requireAdmin, getAdminToken } = require('./middleware/auth');
 
@@ -29,12 +30,25 @@ app.use('/api', (_req, res) => {
   res.status(404).json({ error: 'Endpoint tidak ditemukan' });
 });
 
-// Serve frontend static
-const frontendPath = path.join(__dirname, '../../frontend');
-app.use(express.static(frontendPath));
+// Serve frontend static.
+// Layout differs between local dev (backend/src → ../../frontend) and the
+// Docker image (/app/src → ../frontend), so resolve whichever actually exists.
+const frontendPath = [
+  path.join(__dirname, '../../frontend'),
+  path.join(__dirname, '../frontend'),
+].find((p) => fs.existsSync(path.join(p, 'index.html')));
+
+if (!frontendPath) {
+  console.error('[FATAL] Folder frontend tidak ditemukan. Dashboard tidak akan tersaji.');
+}
+
+app.use(express.static(frontendPath || path.join(__dirname, '../../frontend')));
 
 // SPA fallback
 app.get('*', (req, res) => {
+  if (!frontendPath) {
+    return res.status(500).send('Frontend tidak ter-deploy di container ini.');
+  }
   res.sendFile(path.join(frontendPath, 'index.html'));
 });
 
