@@ -12,7 +12,7 @@ const PERIOD_DAYS = { Last1d: 1, Last7d: 7, Last30d: 30 };
  * distinct), which would insert a duplicate row on every sync.
  */
 function periodRange(periodType) {
-  const fmt = (d) => d.toISOString().slice(0, 10);
+  const fmt = (d) => d.toISOString().slice(0, 10).replace(/-/g, '');
   const end = new Date();
 
   // "Month" means month-to-date, not a rolling 30-day window.
