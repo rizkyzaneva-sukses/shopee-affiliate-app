@@ -15,6 +15,7 @@ let state = {
   affiliates: [],
   campaigns: [],
   source: 'mock',
+  mode: null,   // 'live' | 'mock', from /api/health
 };
 
 let gmvChart = null;
@@ -157,13 +158,27 @@ function handleAuthResult() {
 }
 
 // ---------- Data loading ----------
+
+/**
+ * Mock data must never stand in for real data once the server is live —
+ * otherwise dummy shops and affiliates look like genuine records.
+ */
+function mockAllowed() {
+  return state.mode !== 'live';
+}
+
+async function loadMode() {
+  const res = await apiGet('/api/health');
+  if (res?.mode) state.mode = res.mode;
+}
+
 async function loadShops() {
   const res = await apiGet('/api/shops');
   if (res?.data?.length) {
     state.shops = res.data;
     state.source = 'live';
   } else {
-    state.shops = window.MOCK_SHOPS || [];
+    state.shops = mockAllowed() ? (window.MOCK_SHOPS || []) : [];
   }
   renderShopSelect();
   renderShopList();
@@ -183,7 +198,7 @@ async function loadAffiliates() {
   // this the dashboard would just look empty for no visible reason.
   if (res?.live_error) showToast('Shopee API: ' + res.live_error, 'info');
 
-  if (!data.length) {
+  if (!data.length && mockAllowed()) {
     // Fallback mock + client filter
     data = [...(window.MOCK_AFFILIATES || [])];
     if (state.shop !== 'all') data = data.filter(a => String(a.shop_id) === String(state.shop));
@@ -210,7 +225,9 @@ async function loadAffiliates() {
 async function loadCampaigns() {
   const params = state.shop !== 'all' ? `?shop_id=${state.shop}` : '';
   const res = await apiGet('/api/campaigns' + params);
-  state.campaigns = res?.data?.length ? res.data : (window.MOCK_CAMPAIGNS || []);
+  state.campaigns = res?.data?.length
+    ? res.data
+    : (mockAllowed() ? (window.MOCK_CAMPAIGNS || []) : []);
   renderCampaigns();
 }
 
@@ -407,6 +424,9 @@ async function refreshAll() {
   if (icon) icon.classList.add('fa-spin');
   if (btn) btn.disabled = true;
 
+  // Mode first: the loaders below consult it to decide whether mock data is
+  // an acceptable fallback, so it must be settled before they run.
+  await loadMode();
   await Promise.all([loadShops(), loadAffiliates(), loadCampaigns()]);
   renderChart();
 

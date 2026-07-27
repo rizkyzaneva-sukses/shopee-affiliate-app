@@ -246,16 +246,68 @@ async function getAffiliatePerformance(shopId, accessToken, opts = {}) {
 }
 
 /**
+ * The AMS page_size ceiling is not documented anywhere we can reach, and the
+ * live API rejected both 100 and 50. Rather than guess-and-redeploy, probe
+ * downwards once and remember what the API accepted for the rest of the
+ * process lifetime.
+ */
+const PAGE_SIZE_CANDIDATES = [50, 30, 20, 10, 5, 1];
+let negotiatedPageSize = null;
+
+function isInvalidPageSizeError(err) {
+  return /page_size/i.test(err?.message || '') || /page_size/i.test(err?.code || '');
+}
+
+/** Candidates to try, honouring an explicit SHOPEE_PAGE_SIZE first. */
+function pageSizeCandidates() {
+  const configured = process.env.SHOPEE_PAGE_SIZE ? getPageSize() : null;
+  const rest = PAGE_SIZE_CANDIDATES.filter((n) => n !== configured);
+  return configured ? [configured, ...rest] : [...PAGE_SIZE_CANDIDATES];
+}
+
+/**
+ * Fetch one page, discovering an acceptable page_size on first use.
+ * Only "invalid page_size" triggers a retry — any other error propagates,
+ * so a bad token or wrong channel still fails loudly instead of looping.
+ */
+async function fetchPageWithNegotiation(shopId, accessToken, opts, pageNo) {
+  if (negotiatedPageSize) {
+    return {
+      res: await getAffiliatePerformance(shopId, accessToken, {
+        ...opts, pageNo, pageSize: negotiatedPageSize,
+      }),
+      pageSize: negotiatedPageSize,
+    };
+  }
+
+  let lastErr;
+  for (const size of pageSizeCandidates()) {
+    try {
+      const res = await getAffiliatePerformance(shopId, accessToken, {
+        ...opts, pageNo, pageSize: size,
+      });
+      negotiatedPageSize = size;
+      console.log(`[SHOPEE] page_size ${size} diterima — dipakai untuk request berikutnya`);
+      return { res, pageSize: size };
+    } catch (e) {
+      if (!isInvalidPageSizeError(e)) throw e;
+      console.warn(`[SHOPEE] page_size ${size} ditolak, coba lebih kecil`);
+      lastErr = e;
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * Walk every page of affiliate performance.
- * With page_size capped at 50 a single call no longer covers a full roster,
+ * A single page does not cover a full roster once page_size is small,
  * so callers that need the whole list must paginate.
  */
-async function getAllAffiliatePerformance(shopId, accessToken, opts = {}, maxPages = 40) {
-  const pageSize = getPageSize();
+async function getAllAffiliatePerformance(shopId, accessToken, opts = {}, maxPages = 200) {
   const all = [];
 
   for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
-    const res = await getAffiliatePerformance(shopId, accessToken, { ...opts, pageNo, pageSize });
+    const { res, pageSize } = await fetchPageWithNegotiation(shopId, accessToken, opts, pageNo);
     const list = res.response?.list || [];
     all.push(...list);
 
@@ -269,6 +321,23 @@ async function getAllAffiliatePerformance(shopId, accessToken, opts = {}, maxPag
   }
 
   return all;
+}
+
+/**
+ * Diagnostic: report which page_size values the live API actually accepts.
+ * Exists because the error message alone does not reveal the valid range.
+ */
+async function probePageSizes(shopId, accessToken, sizes = [100, 50, 30, 20, 10, 5, 1]) {
+  const results = [];
+  for (const size of sizes) {
+    try {
+      const res = await getAffiliatePerformance(shopId, accessToken, { pageNo: 1, pageSize: size });
+      results.push({ page_size: size, ok: true, returned: (res.response?.list || []).length });
+    } catch (e) {
+      results.push({ page_size: size, ok: false, error: e.message, code: e.code });
+    }
+  }
+  return results;
 }
 
 async function getManagedAffiliateList(shopId, accessToken, pageNo = 1, pageSize = getPageSize()) {
@@ -345,6 +414,7 @@ module.exports = {
   normalizeChannel,
   getAffiliatePerformance,
   getAllAffiliatePerformance,
+  probePageSizes,
   getManagedAffiliateList,
   refreshAccessToken,
   ensureValidToken,

@@ -119,6 +119,60 @@ router.get('/auth/callback', async (req, res) => {
   }
 });
 
+// ---------- Diagnostics ----------
+
+/**
+ * Reports which page_size values the AMS API accepts for a shop, and echoes
+ * the raw first page. Use this to pin down parameter limits without guessing.
+ */
+router.get('/diag/page-size/:shopId', async (req, res) => {
+  try {
+    const { rows } = await query(`SELECT * FROM shops WHERE shop_id = $1`, [req.params.shopId]);
+    if (!rows.length) return res.status(404).json({ error: 'Shop not found' });
+
+    const token = await shopee.ensureValidToken(rows[0]);
+    const results = await shopee.probePageSizes(req.params.shopId, token);
+    const accepted = results.filter((r) => r.ok).map((r) => r.page_size);
+
+    res.json({
+      shop_id: req.params.shopId,
+      accepted,
+      recommendation: accepted.length
+        ? `Set SHOPEE_PAGE_SIZE=${Math.max(...accepted)}`
+        : 'Tidak ada page_size yang diterima — masalahnya bukan di page_size.',
+      results,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message, code: e.code });
+  }
+});
+
+/**
+ * Sends one raw request with fully caller-controlled params and returns
+ * Shopee's untouched reply, so parameter names/values can be tested directly.
+ */
+router.get('/diag/raw/:shopId', async (req, res) => {
+  try {
+    const { rows } = await query(`SELECT * FROM shops WHERE shop_id = $1`, [req.params.shopId]);
+    if (!rows.length) return res.status(404).json({ error: 'Shop not found' });
+
+    const token = await shopee.ensureValidToken(rows[0]);
+    const { path, ...queryParams } = req.query;
+    if (!path) return res.status(400).json({ error: 'Parameter "path" wajib diisi' });
+
+    const data = await shopee.shopeeRequest({
+      method: 'GET',
+      path,
+      shopId: req.params.shopId,
+      accessToken: token,
+      queryParams,
+    });
+    res.json({ ok: true, data });
+  } catch (e) {
+    res.status(500).json({ error: e.message, code: e.code, requestId: e.requestId });
+  }
+});
+
 // ---------- Shops ----------
 router.get('/shops', async (_req, res) => {
   try {
