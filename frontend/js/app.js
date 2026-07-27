@@ -1,6 +1,6 @@
 /**
  * Shopee Affiliate Manager - Frontend
- * Tries backend API first, falls back to mock data
+ * Live mode only — no mock data fallback.
  */
 
 const API = window.APP_CONFIG?.API_BASE || '';
@@ -14,8 +14,9 @@ let state = {
   shops: [],
   affiliates: [],
   campaigns: [],
-  source: 'mock',
+  source: 'live',
   mode: null,   // 'live' | 'mock', from /api/health
+  syncing: false,
 };
 
 let gmvChart = null;
@@ -109,8 +110,6 @@ async function apiGet(path) {
       return null;
     }
     if (res.status === 503) {
-      // Server misconfigured (e.g. ADMIN_TOKEN unset). Surface it once instead
-      // of silently falling back to mock data, which looks like it "works".
       const body = await res.json().catch(() => ({}));
       if (!configErrorShown) {
         configErrorShown = true;
@@ -126,12 +125,29 @@ async function apiGet(path) {
   }
 }
 
+async function apiPost(path, body = {}) {
+  try {
+    const res = await fetch(`${API}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 401) {
+      clearAdminToken();
+      requireLogin();
+      return null;
+    }
+    return await res.json();
+  } catch (e) {
+    console.warn('[API]', path, e.message);
+    return null;
+  }
+}
+
 // ---------- Shop authorization ----------
 async function connectShop() {
   showToast('Menyiapkan link otorisasi Shopee...', 'info');
   try {
-    // Direct fetch, not apiGet: the server's error message is the useful part
-    // here (missing partner id, missing redirect uri) and must not be swallowed.
     const res = await fetch(`${API}/api/auth/url`, { headers: authHeaders() });
     const data = await res.json();
     if (res.status === 401) {
@@ -148,7 +164,6 @@ async function connectShop() {
   }
 }
 
-/** Reads ?auth=success|error&msg=... left by the OAuth callback redirect. */
 function handleAuthResult() {
   const p = new URLSearchParams(window.location.search);
   const status = p.get('auth');
@@ -159,14 +174,6 @@ function handleAuthResult() {
 
 // ---------- Data loading ----------
 
-/**
- * Mock data must never stand in for real data once the server is live —
- * otherwise dummy shops and affiliates look like genuine records.
- */
-function mockAllowed() {
-  return state.mode !== 'live';
-}
-
 async function loadMode() {
   const res = await apiGet('/api/health');
   if (res?.mode) state.mode = res.mode;
@@ -174,12 +181,7 @@ async function loadMode() {
 
 async function loadShops() {
   const res = await apiGet('/api/shops');
-  if (res?.data?.length) {
-    state.shops = res.data;
-    state.source = 'live';
-  } else {
-    state.shops = mockAllowed() ? (window.MOCK_SHOPS || []) : [];
-  }
+  state.shops = res?.data || [];
   renderShopSelect();
   renderShopList();
 }
@@ -194,27 +196,9 @@ async function loadAffiliates() {
   const res = await apiGet('/api/affiliates?' + params.toString());
   let data = res?.data || [];
 
-  // The server falls back to cached rows when the live call fails; without
-  // this the dashboard would just look empty for no visible reason.
   if (res?.live_error) showToast('Shopee API: ' + res.live_error, 'info');
 
-  if (!data.length && mockAllowed()) {
-    // Fallback mock + client filter
-    data = [...(window.MOCK_AFFILIATES || [])];
-    if (state.shop !== 'all') data = data.filter(a => String(a.shop_id) === String(state.shop));
-    if (state.channel !== 'all') {
-      const map = { social: 'Social Media', video: 'Shopee Video', live: 'Live Streaming' };
-      data = data.filter(a => a.channel === map[state.channel]);
-    }
-    if (state.search) {
-      const q = state.search.toLowerCase();
-      data = data.filter(a => (a.name || '').toLowerCase().includes(q) || (a.username || '').toLowerCase().includes(q));
-    }
-    state.source = 'mock';
-  } else {
-    state.source = res.source || 'live';
-  }
-
+  state.source = data.length ? (res?.source || 'live') : 'empty';
   state.affiliates = data.sort((a, b) => (b.gmv || 0) - (a.gmv || 0));
   updateKPI();
   renderTop();
@@ -225,9 +209,7 @@ async function loadAffiliates() {
 async function loadCampaigns() {
   const params = state.shop !== 'all' ? `?shop_id=${state.shop}` : '';
   const res = await apiGet('/api/campaigns' + params);
-  state.campaigns = res?.data?.length
-    ? res.data
-    : (mockAllowed() ? (window.MOCK_CAMPAIGNS || []) : []);
+  state.campaigns = res?.data || [];
   renderCampaigns();
 }
 
@@ -235,8 +217,16 @@ async function loadCampaigns() {
 function updateModeBadge() {
   const el = document.getElementById('modeBadge');
   if (!el) return;
-  el.textContent = state.source === 'live' ? 'LIVE API' : 'MOCK DATA';
-  el.className = 'mode-badge ' + (state.source === 'live' ? 'mode-live' : 'mode-mock');
+  if (state.mode === 'live' && state.source === 'live') {
+    el.textContent = 'LIVE API';
+    el.className = 'mode-badge mode-live';
+  } else if (state.mode === 'live' && state.source === 'empty') {
+    el.textContent = 'LIVE (NO DATA)';
+    el.className = 'mode-badge mode-live';
+  } else {
+    el.textContent = 'MOCK DATA';
+    el.className = 'mode-badge mode-mock';
+  }
 }
 
 function updateKPI() {
@@ -260,7 +250,12 @@ function renderTop() {
   const el = document.getElementById('topAffiliates');
   const top = state.affiliates.slice(0, 5);
   if (!top.length) {
-    el.innerHTML = '<p class="text-slate-500 text-sm text-center py-6">Tidak ada data</p>';
+    el.innerHTML = `
+      <div class="text-center py-8">
+        <i class="fas fa-users text-3xl text-slate-700 mb-3"></i>
+        <p class="text-slate-500 text-sm">Belum ada data afiliator</p>
+        <p class="text-xs text-slate-600 mt-1">Hubungkan toko lalu sync untuk mulai</p>
+      </div>`;
     return;
   }
   el.innerHTML = top.map((a, i) => {
@@ -285,7 +280,18 @@ function renderTable() {
   document.getElementById('affiliateCount').textContent = state.affiliates.length + ' afiliator';
 
   if (!state.affiliates.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="text-center py-10 text-slate-500">Tidak ada afiliator</td></tr>';
+    const hasShops = state.shops.length > 0;
+    tbody.innerHTML = `
+      <tr><td colspan="9" class="text-center py-12">
+        <div class="flex flex-col items-center gap-3">
+          <i class="fas ${hasShops ? 'fa-sync-alt' : 'fa-store'} text-3xl text-slate-700"></i>
+          <p class="text-slate-400 text-sm font-medium">${hasShops ? 'Belum ada data performa' : 'Belum ada toko terhubung'}</p>
+          <p class="text-xs text-slate-600 max-w-sm">${hasShops
+            ? 'Klik "Sync" pada toko untuk menarik data dari Shopee.'
+            : 'Klik "Hubungkan Toko" untuk mengotorisasi akun Shopee kamu.'}</p>
+          ${hasShops ? '<button class="btn btn-primary mt-2" onclick="syncAllShops()"><i class="fas fa-sync-alt"></i> Sync Semua Toko</button>' : ''}
+        </div>
+      </td></tr>`;
     return;
   }
 
@@ -331,18 +337,40 @@ function renderShopSelect() {
 function renderShopList() {
   const el = document.getElementById('shopList');
   if (!el) return;
+
+  if (!state.shops.length) {
+    el.innerHTML = `
+      <div class="text-center py-10">
+        <i class="fas fa-store text-3xl text-slate-700 mb-3"></i>
+        <p class="text-slate-400 text-sm font-medium">Belum ada toko terhubung</p>
+        <p class="text-xs text-slate-600 mt-1 mb-4">Klik tombol di bawah untuk mengotorisasi toko Shopee kamu.</p>
+        <button class="btn btn-primary" onclick="connectShop()"><i class="fas fa-link text-xs"></i> Hubungkan Toko</button>
+      </div>`;
+    return;
+  }
+
+  const lastSync = (s) => {
+    if (!s.last_sync_at) return 'Belum pernah sync';
+    const d = new Date(s.last_sync_at);
+    const diff = Math.floor((Date.now() - d.getTime()) / 60000);
+    if (diff < 1) return 'Baru saja';
+    if (diff < 60) return diff + ' menit lalu';
+    if (diff < 1440) return Math.floor(diff / 60) + ' jam lalu';
+    return Math.floor(diff / 1440) + ' hari lalu';
+  };
+
   el.innerHTML = state.shops.map(s => `
     <div class="shop-item ${s.status === 'inactive' ? 'opacity-60' : ''}">
       <div class="flex items-center gap-3">
-        <div class="w-9 h-9 rounded-lg bg-orange-500/20 text-orange-400 flex items-center justify-center text-sm font-bold">
+        <div class="w-9 h-9 rounded-lg bg-orange-500/20 text-orange-400 flex items-center justify-content-center text-sm font-bold">
           ${(s.shop_name || 'S').charAt(0)}
         </div>
         <div>
           <p class="font-medium text-sm text-slate-100">${s.shop_name || s.shop_id}</p>
-          <p class="text-xs text-slate-500">${s.region || '-'} · ${s.status || 'active'}</p>
+          <p class="text-xs text-slate-500">${s.region || '-'} · ${s.status || 'active'} · ${lastSync(s)}</p>
         </div>
       </div>
-      <button class="btn btn-ghost text-xs" onclick="syncShop('${s.shop_id}')">
+      <button class="btn btn-ghost text-xs" onclick="syncShop('${s.shop_id}')" id="syncBtn-${s.shop_id}">
         <i class="fas fa-sync-alt"></i> Sync
       </button>
     </div>
@@ -352,6 +380,16 @@ function renderShopList() {
 function renderCampaigns() {
   const el = document.getElementById('campaignList');
   if (!el) return;
+
+  if (!state.campaigns.length) {
+    el.innerHTML = `
+      <div class="sm:col-span-2 text-center py-10">
+        <i class="fas fa-bullhorn text-3xl text-slate-700 mb-3"></i>
+        <p class="text-slate-500 text-sm">Belum ada campaign</p>
+      </div>`;
+    return;
+  }
+
   el.innerHTML = state.campaigns.map(c => {
     const st = c.status === 'Ongoing' ? 'status-active' : c.status === 'Upcoming' ? 'status-warning' : 'status-inactive';
     return `
@@ -375,7 +413,25 @@ function renderChart() {
   const canvas = document.getElementById('gmvChart');
   if (!canvas) return;
   if (gmvChart) gmvChart.destroy();
+
   const t = window.MOCK_TREND;
+  // If no trend data, render empty chart
+  if (!t.labels || !t.labels.length) {
+    gmvChart = new Chart(canvas.getContext('2d'), {
+      type: 'line',
+      data: { labels: ['—'], datasets: [{ label: 'GMV', data: [0], borderColor: '#f97316', backgroundColor: 'transparent' }] },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          y: { display: false },
+          x: { grid: { display: false }, ticks: { color: '#64748b' } }
+        }
+      }
+    });
+    return;
+  }
+
   gmvChart = new Chart(canvas.getContext('2d'), {
     type: 'line',
     data: {
@@ -424,8 +480,6 @@ async function refreshAll() {
   if (icon) icon.classList.add('fa-spin');
   if (btn) btn.disabled = true;
 
-  // Mode first: the loaders below consult it to decide whether mock data is
-  // an acceptable fallback, so it must be settled before they run.
   await loadMode();
   await Promise.all([loadShops(), loadAffiliates(), loadCampaigns()]);
   renderChart();
@@ -436,25 +490,52 @@ async function refreshAll() {
 }
 
 async function syncShop(shopId) {
+  const btn = document.getElementById(`syncBtn-${shopId}`);
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Syncing...'; }
+
   showToast('Sync toko ' + shopId + ' ...', 'info');
-  try {
-    const res = await fetch(`${API}/api/sync/${shopId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ period: state.period }),
-    });
-    if (res.status === 401) {
-      clearAdminToken();
-      return requireLogin();
-    }
-    const data = await res.json();
-    if (data.error) showToast(data.error, 'info');
-    else {
-      showToast(`Synced ${data.synced || 0} afiliator`, 'success');
-      await loadAffiliates();
-    }
-  } catch (e) {
-    showToast('Sync gagal: ' + e.message, 'info');
+  const res = await apiPost(`/api/sync/${shopId}`, { period: state.period });
+
+  if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sync-alt"></i> Sync'; }
+
+  if (res?.error) showToast(res.error, 'info');
+  else {
+    showToast(`Synced ${res?.synced || 0} afiliator`, 'success');
+    await Promise.all([loadAffiliates(), loadShops()]);
+  }
+}
+
+async function syncAllShops() {
+  if (state.syncing) return;
+  state.syncing = true;
+
+  const btn = document.getElementById('btnSyncAll');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Syncing...'; }
+
+  showToast('Sync semua toko...', 'info');
+  const res = await apiPost('/api/sync/all', { period: state.period });
+
+  state.syncing = false;
+  if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sync-alt"></i> Sync Semua'; }
+
+  if (res?.error) {
+    showToast(res.error, 'info');
+  } else {
+    const total = res?.total || 0;
+    showToast(`Synced ${total} afiliator dari ${res?.shops?.length || 0} toko`, 'success');
+    await Promise.all([loadAffiliates(), loadCampaigns(), loadShops()]);
+  }
+}
+
+async function discoverShops() {
+  showToast('Mencari toko dari Shopee...', 'info');
+  const res = await apiPost('/api/shops/discover');
+  if (res?.error) {
+    showToast(res.error, 'info');
+  } else {
+    const count = res?.synced || 0;
+    showToast(`Ditemukan ${count} toko dari Shopee`, 'success');
+    await loadShops();
   }
 }
 

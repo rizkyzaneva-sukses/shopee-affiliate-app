@@ -186,6 +186,121 @@ router.get('/shops', async (_req, res) => {
   }
 });
 
+/**
+ * Discover shops via get_shops_by_partner — fetches all shops that have
+ * authorized the app and upserts them into the DB.
+ */
+router.post('/shops/discover', async (_req, res) => {
+  try {
+    const data = await shopee.getShopsByPartner();
+    const list = data.response?.shop_list || [];
+    let upserted = 0;
+
+    for (const s of list) {
+      const sid = s.shop_id;
+      if (!sid) continue;
+      await query(
+        `INSERT INTO shops (shop_id, shop_name, region, status, raw_info)
+         VALUES ($1, $2, $3, 'active', $4)
+         ON CONFLICT (shop_id) DO UPDATE SET
+           shop_name = COALESCE(EXCLUDED.shop_name, shops.shop_name),
+           region = COALESCE(EXCLUDED.region, shops.region),
+           raw_info = EXCLUDED.raw_info,
+           updated_at = NOW()`,
+        [sid, s.shop_name || null, s.region || process.env.SHOPEE_REGION || 'ID',
+         JSON.stringify(s)]
+      );
+      upserted++;
+    }
+
+    await query(
+      `INSERT INTO sync_logs (shop_id, action, status, message) VALUES (0, 'discover_shops', 'success', $1)`,
+      [`Discovered ${upserted} shops from Shopee partner API`]
+    ).catch(() => {});
+
+    res.json({ success: true, shops: list.length, synced: upserted });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * Sync all shops in one call — iterates each shop and syncs affiliate
+ * performance. Useful for "Sync Semua" button on the frontend.
+ */
+router.post('/sync/all', async (req, res) => {
+  const mode = process.env.APP_MODE || 'mock';
+  if (mode !== 'live') {
+    return res.json({ message: 'Mode mock — sync dilewati.', synced: 0 });
+  }
+
+  try {
+    const { rows: shops } = await query(`SELECT * FROM shops WHERE status = 'active' ORDER BY shop_name`);
+    if (!shops.length) return res.json({ message: 'Tidak ada toko aktif.', synced: 0 });
+
+    let totalSynced = 0;
+    const results = [];
+
+    for (const shop of shops) {
+      try {
+        const token = await shopee.ensureValidToken(shop);
+        const periodType = req.body?.period || 'Last30d';
+        const channel = shopee.normalizeChannel(req.body?.channel);
+        const { startDate, endDate } = periodRange(periodType);
+
+        const list = await shopee.getAllAffiliatePerformance(shop.shop_id, token, { periodType, channel });
+        let count = 0;
+
+        for (const a of list) {
+          await query(
+            `INSERT INTO affiliates (affiliate_id, shop_id, name, username, status)
+             VALUES ($1, $2, $3, $4, 'active')
+             ON CONFLICT (affiliate_id, shop_id) DO UPDATE SET
+               name = EXCLUDED.name,
+               username = EXCLUDED.username,
+               updated_at = NOW()`,
+            [a.affiliate_id, shop.shop_id, a.affiliate_name, a.affiliate_username]
+          );
+
+          await query(
+            `INSERT INTO affiliate_performance
+               (affiliate_id, shop_id, period_type, start_date, end_date, channel,
+                gmv, orders, clicks, est_commission, roi, total_buyers, new_buyers, synced_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+             ON CONFLICT (affiliate_id, shop_id, period_type, start_date, end_date, channel)
+             DO UPDATE SET
+               gmv = EXCLUDED.gmv, orders = EXCLUDED.orders, clicks = EXCLUDED.clicks,
+               est_commission = EXCLUDED.est_commission, roi = EXCLUDED.roi,
+               total_buyers = EXCLUDED.total_buyers, new_buyers = EXCLUDED.new_buyers,
+               synced_at = NOW()`,
+            [a.affiliate_id, shop.shop_id, periodType, startDate, endDate, channel,
+             Number(a.sales || 0), a.orders || 0, a.clicks || 0,
+             Number(a.est_commission || 0), Number(a.roi || 0),
+             a.total_buyers || 0, a.new_buyers || 0]
+          );
+          count++;
+        }
+
+        await query(`UPDATE shops SET last_sync_at = NOW() WHERE shop_id = $1`, [shop.shop_id]);
+        totalSynced += count;
+        results.push({ shop_id: shop.shop_id, name: shop.shop_name, synced: count });
+      } catch (e) {
+        console.error(`[SYNC-ALL] Shop ${shop.shop_id} gagal:`, e.message);
+        results.push({ shop_id: shop.shop_id, name: shop.shop_name, error: e.message });
+      }
+    }
+
+    await query(
+      `INSERT INTO sync_logs (shop_id, action, status, message) VALUES (0, 'sync_all', 'success', $1)`,
+      [`Synced ${totalSynced} affiliates from ${shops.length} shops`]
+    ).catch(() => {});
+
+    res.json({ success: true, total: totalSynced, shops: results });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.post('/shops', async (req, res) => {
   // Manual add / update shop tokens (after authorization callback)
   try {

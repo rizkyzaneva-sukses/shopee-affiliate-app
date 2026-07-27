@@ -171,12 +171,16 @@
     <div data-panel="shops" class="p-5 hidden space-y-4">
       <div class="flex items-center justify-between">
         <h3 class="text-sm font-semibold text-slate-200">Toko Terhubung</h3>
-        <button class="btn btn-primary" onclick="connectShop()"><i class="fas fa-link text-xs"></i> Hubungkan Toko</button>
+        <div class="flex gap-2">
+          <button id="btnDiscover" class="btn btn-ghost" onclick="discoverShops()"><i class="fas fa-search text-xs"></i> Cari Toko</button>
+          <button id="btnSyncAll" class="btn btn-ghost" onclick="syncAllShops()"><i class="fas fa-sync-alt text-xs"></i> Sync Semua</button>
+          <button class="btn btn-primary" onclick="connectShop()"><i class="fas fa-link text-xs"></i> Hubungkan Toko</button>
+        </div>
       </div>
       <div id="shopList"></div>
       <div class="card p-4 text-xs text-slate-500 leading-relaxed">
         <i class="fas fa-info-circle text-orange-400 mr-1"></i>
-        Token disimpan di PostgreSQL. Sync menarik data dari <code class="text-slate-400">v2.ams.get_affiliate_performance</code>.
+        Token disimpan di PostgreSQL. "Cari Toko" menarik daftar toko dari Shopee Partner API. "Sync Semua" menarik data performa afiliator dari semua toko aktif.
       </div>
     </div>
   </div>
