@@ -58,28 +58,6 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: err.message || 'Internal Server Error' });
 });
 
-// Auto-run migrations on startup
-(async () => {
-  const migrationDir = path.join(__dirname, '../../database');
-  try {
-    const { Pool } = require('pg');
-    const migPool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
-    const files = fs.readdirSync(migrationDir)
-      .filter(f => f.startsWith('migration_') && f.endsWith('.sql'))
-      .sort();
-    const client = await migPool.connect();
-    for (const file of files) {
-      const sql = fs.readFileSync(path.join(migrationDir, file), 'utf8');
-      await client.query(sql);
-      console.log(`[MIGRATE] Applied: ${file}`);
-    }
-    client.release();
-    await migPool.end();
-  } catch (e) {
-    console.error('[MIGRATE] Error:', e.message);
-  }
-})();
-
 app.listen(PORT, '0.0.0.0', () => {
   const auth = getAdminToken() ? 'protected' : 'OPEN (!)';
   console.log(`

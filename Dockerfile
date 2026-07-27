@@ -8,6 +8,8 @@ RUN npm install --omit=dev
 
 # Copy application code
 COPY backend/src ./src
+COPY backend/start.sh ./start.sh
+RUN chmod +x start.sh
 COPY frontend ./frontend
 COPY database ./database
 
@@ -16,4 +18,4 @@ ENV PORT=3000
 
 EXPOSE 3000
 
-CMD ["node", "src/index.js"]
+CMD ["./start.sh"]
