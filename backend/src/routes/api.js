@@ -889,4 +889,190 @@ router.get('/campaigns/sync-all', async (_req, res) => {
   }
 });
 
+
+// ---------- Alerts (anomaly detection) ----------
+router.get('/alerts', async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT * FROM alerts WHERE active = true ORDER BY created_at DESC LIMIT 50`
+    );
+    res.json({ data: rows });
+  } catch (e) {
+    // If table doesn't exist, return empty
+    res.json({ data: [] });
+  }
+});
+
+router.post('/alerts/check', async (_req, res) => {
+  try {
+    // Check for anomalies: affiliates with 0 orders in last 30d but had orders before
+    const { rows: dropped } = await query(`
+      SELECT a.name, a.username, a.shop_id,
+             COALESCE(p.gmv, 0) AS current_gmv,
+             COALESCE(p.orders, 0) AS current_orders
+      FROM affiliates a
+      LEFT JOIN LATERAL (
+        SELECT * FROM affiliate_performance ap
+        WHERE ap.affiliate_id = a.affiliate_id AND ap.shop_id = a.shop_id
+          AND ap.period_type = 'Last30d'
+        ORDER BY ap.synced_at DESC LIMIT 1
+      ) p ON true
+      WHERE COALESCE(p.orders, 0) = 0 AND COALESCE(p.gmv, 0) = 0
+        AND a.status = 'active'
+      LIMIT 10
+    `);
+
+    // Check for total GMV drop vs previous period (compare Last30d vs Last7d extrapolated)
+    const { rows: summary } = await query(`
+      SELECT
+        SUM(CASE WHEN period_type = 'Last30d' THEN gmv ELSE 0 END) AS gmv_30d,
+        SUM(CASE WHEN period_type = 'Last7d' THEN gmv * 4 ELSE 0 END) AS gmv_7d_extrapolated,
+        SUM(CASE WHEN period_type = 'Last30d' THEN orders ELSE 0 END) AS orders_30d,
+        SUM(CASE WHEN period_type = 'Last7d' THEN orders * 4 ELSE 0 END) AS orders_7d_extrapolated
+      FROM affiliate_performance
+      WHERE period_type IN ('Last30d', 'Last7d')
+    `);
+
+    const alerts = [];
+    const s = summary[0] || {};
+    const gmv30 = Number(s.gmv_30d || 0);
+    const gmv7ext = Number(s.gmv_7d_extrapolated || 0);
+    if (gmv30 > 0 && gmv7ext > 0 && gmv7ext < gmv30 * 0.7) {
+      alerts.push({
+        type: 'warning',
+        title: 'GMV Turun Signifikan',
+        message: `Extrapolasi dari data 7 hari (${formatRupiahShort(gmv7ext)}) < 70% dari 30 hari (${formatRupiahShort(gmv30)})`,
+        created_at: new Date().toISOString()
+      });
+    }
+
+    if (dropped.length > 0) {
+      alerts.push({
+        type: 'info',
+        title: 'Afiliator Tidak Aktif',
+        message: `${dropped.length} afiliator tidak punya order/GMV di periode ini`,
+        created_at: new Date().toISOString()
+      });
+    }
+
+    // Commission drop check
+    const { rows: commRows } = await query(`
+      SELECT
+        SUM(CASE WHEN period_type = 'Last30d' THEN est_commission ELSE 0 END) AS comm_30d,
+        SUM(CASE WHEN period_type = 'Last7d' THEN est_commission * 4 ELSE 0 END) AS comm_7d_ext
+      FROM affiliate_performance
+      WHERE period_type IN ('Last30d', 'Last7d')
+    `);
+    const c = commRows[0] || {};
+    const comm30 = Number(c.comm_30d || 0);
+    const comm7ext = Number(c.comm_7d_ext || 0);
+    if (comm30 > 0 && comm7ext > 0 && comm7ext < comm30 * 0.7) {
+      alerts.push({
+        type: 'warning',
+        title: 'Komisi Turun',
+        message: `Extrapolasi komisi 7 hari (${formatRupiahShort(comm7ext)}) turun dari 30 hari (${formatRupiahShort(comm30)})`,
+        created_at: new Date().toISOString()
+      });
+    }
+
+    // Store alerts
+    for (const a of alerts) {
+      await query(
+        `INSERT INTO alerts (type, title, message, active) VALUES ($1, $2, $3, true)`,
+        [a.type, a.title, a.message]
+      ).catch(() => {});
+    }
+
+    res.json({ alerts, checked_at: new Date().toISOString() });
+  } catch (e) {
+    // If alerts table doesn't exist, just return empty
+    res.json({ alerts: [], checked_at: new Date().toISOString() });
+  }
+});
+
+// ---------- Export (CSV) ----------
+router.get('/export/csv', async (req, res) => {
+  try {
+    const shopId = req.query.shop_id;
+    const period = req.query.period || 'Last30d';
+    const channel = req.query.channel && req.query.channel !== 'all' ? req.query.channel : null;
+
+    let sql = `
+      SELECT a.name, a.username, a.channel AS aff_channel,
+             COALESCE(p.gmv, 0) AS gmv,
+             COALESCE(p.orders, 0) AS orders,
+             COALESCE(p.clicks, 0) AS clicks,
+             COALESCE(p.est_commission, 0) AS commission,
+             COALESCE(p.roi, 0) AS roi,
+             COALESCE(p.total_buyers, 0) AS total_buyers,
+             COALESCE(p.new_buyers, 0) AS new_buyers,
+             p.period_type, p.start_date, p.end_date
+      FROM affiliates a
+      LEFT JOIN LATERAL (
+        SELECT * FROM affiliate_performance ap
+        WHERE ap.affiliate_id = a.affiliate_id AND ap.shop_id = a.shop_id
+          AND ap.period_type = $1
+        ORDER BY ap.synced_at DESC LIMIT 1
+      ) p ON true
+      WHERE 1=1
+    `;
+    const params = [period];
+    let idx = 2;
+
+    if (shopId && shopId !== 'all') {
+      sql += ` AND a.shop_id = $${idx++}`;
+      params.push(shopId);
+    }
+    if (channel) {
+      sql += ` AND p.channel = $${idx++}`;
+      params.push(channel);
+    }
+    sql += ` ORDER BY gmv DESC NULLS LAST`;
+
+    const { rows } = await query(sql, params);
+
+    // Build CSV
+    const header = 'Nama,Username,Channel,GMV,Orders,Clicks,Komisi,ROI,Total Buyers,New Buyers';
+    const csvRows = rows.map(r =>
+      `"${(r.name || '').replace(/"/g, '""')}","${r.username || ''}","${r.aff_channel || ''}",${r.gmv},${r.orders},${r.clicks},${r.commission},${r.roi},${r.total_buyers},${r.new_buyers}`
+    );
+    const csv = [header, ...csvRows].join('\n');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="affiliate-report-${period}-${new Date().toISOString().slice(0,10)}.csv"`);
+    res.send('\uFEFF' + csv); // BOM for Excel
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Commission Calculator ----------
+router.post('/calculator/simulate', async (req, res) => {
+  try {
+    const { current_gmv, target_gmv, avg_commission_rate, avg_order_value } = req.body;
+    const rate = Number(avg_commission_rate) / 100 || 0.06;
+    const aov = Number(avg_order_value) || 300000;
+    const currentGmv = Number(current_gmv) || 0;
+    const targetGmv = Number(target_gmv) || 0;
+
+    const currentOrders = Math.round(currentGmv / aov);
+    const targetOrders = Math.round(targetGmv / aov);
+    const additionalOrders = targetOrders - currentOrders;
+    const additionalGmv = targetGmv - currentGmv;
+    const additionalCommission = additionalGmv * rate;
+    const totalCommission = targetGmv * rate;
+    const progressPct = targetGmv > 0 ? Math.min(100, (currentGmv / targetGmv) * 100) : 0;
+
+    res.json({
+      current: { gmv: currentGmv, orders: currentOrders, commission: currentGmv * rate },
+      target: { gmv: targetGmv, orders: targetOrders, commission: totalCommission },
+      gap: { gmv: additionalGmv, orders: additionalOrders, commission: additionalCommission },
+      progress_pct: Number(progressPct.toFixed(1)),
+      assumptions: { commission_rate: (rate * 100).toFixed(1) + '%', avg_order_value: aov },
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;

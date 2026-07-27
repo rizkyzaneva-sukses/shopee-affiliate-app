@@ -98,6 +98,8 @@
             <option value="ShopeeVideo">Shopee Video</option>
             <option value="LiveStreaming">Live Streaming</option>
           </select>
+          <button id="btnExport" onclick="exportCSV()" class="btn btn-ghost"><i class="fas fa-download text-xs"></i> Export</button>
+          <button id="btnCalculator" onclick="showCalculator()" class="btn btn-ghost"><i class="fas fa-calculator text-xs"></i> Kalkulator</button>
           <button id="btnRefresh" onclick="refreshAll()" class="btn btn-primary"><i class="fas fa-sync-alt text-xs"></i> Refresh</button>
         </div>
       </div>
@@ -105,6 +107,9 @@
 
     <!-- Dashboard -->
     <div data-panel="dashboard" class="p-5 space-y-5">
+      <!-- Alert Banner -->
+      <div id="alertBanner" class="hidden"></div>
+
       <div class="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
         <div class="card p-4"><div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total GMV</span><div class="kpi-icon" style="background:rgba(16,185,129,.15);color:#34d399"><i class="fas fa-money-bill-wave"></i></div></div><p class="text-xl font-bold text-slate-100" id="kpiGmv">—</p></div>
         <div class="card p-4"><div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total Order</span><div class="kpi-icon" style="background:rgba(59,130,246,.15);color:#60a5fa"><i class="fas fa-shopping-bag"></i></div></div><p class="text-xl font-bold text-slate-100" id="kpiOrder">—</p></div>
@@ -261,6 +266,64 @@
         <i class="fas fa-info-circle text-orange-400 mr-1"></i>
         Token disimpan di PostgreSQL. "Cari Toko" menarik daftar toko dari Shopee Partner API. "Sync Semua" menarik data performa afiliator dari semua toko aktif.
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Calculator Modal -->
+<div id="calculatorModal" class="fixed inset-0 z-50 hidden" style="background:rgba(2,6,23,.85)">
+  <div class="flex items-center justify-center h-full p-4">
+    <div class="card p-6 w-full max-w-lg">
+      <h3 class="text-base font-semibold text-slate-100 mb-4">🧮 Kalkulator Komisi</h3>
+      <div class="space-y-3">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="text-xs text-slate-500 mb-1 block">GMV Saat Ini (Rp)</label>
+            <input id="calcCurrentGmv" type="number" class="input w-full" placeholder="10000000" />
+          </div>
+          <div>
+            <label class="text-xs text-slate-500 mb-1 block">Target GMV (Rp)</label>
+            <input id="calcTargetGmv" type="number" class="input w-full" placeholder="50000000" />
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="text-xs text-slate-500 mb-1 block">Rate Komisi (%)</label>
+            <input id="calcCommRate" type="number" class="input w-full" placeholder="6" value="6" step="0.5" />
+          </div>
+          <div>
+            <label class="text-xs text-slate-500 mb-1 block">Avg Order Value (Rp)</label>
+            <input id="calcAov" type="number" class="input w-full" placeholder="300000" value="300000" />
+          </div>
+        </div>
+        <button class="btn btn-primary w-full" onclick="runCalculator()"><i class="fas fa-calculator"></i> Hitung</button>
+      </div>
+      <div id="calcResult" class="mt-4 hidden">
+        <div class="bg-slate-900/50 rounded-lg p-4 space-y-3">
+          <div class="flex items-center justify-between text-sm">
+            <span class="text-slate-400">Progress</span>
+            <span class="font-bold text-slate-100" id="calcProgress">—</span>
+          </div>
+          <div class="h-3 bg-slate-800 rounded-full overflow-hidden">
+            <div id="calcProgressBar" class="h-full bg-gradient-to-r from-orange-500 to-amber-400 rounded-full transition-all" style="width:0%"></div>
+          </div>
+          <div class="grid grid-cols-3 gap-3 text-center mt-3">
+            <div class="bg-slate-800/50 rounded-lg p-3">
+              <p class="text-[10px] text-slate-500">Order Dibutuhkan</p>
+              <p class="font-bold text-slate-100" id="calcOrdersGap">—</p>
+            </div>
+            <div class="bg-slate-800/50 rounded-lg p-3">
+              <p class="text-[10px] text-slate-500">GMV Kurang</p>
+              <p class="font-bold text-orange-400" id="calcGmvGap">—</p>
+            </div>
+            <div class="bg-slate-800/50 rounded-lg p-3">
+              <p class="text-[10px] text-slate-500">Komisi Target</p>
+              <p class="font-bold text-emerald-400" id="calcCommTarget">—</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <button class="btn btn-ghost w-full mt-3" onclick="closeCalculator()">Tutup</button>
     </div>
   </div>
 </div>

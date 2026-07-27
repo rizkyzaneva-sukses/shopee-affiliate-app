@@ -713,6 +713,98 @@ async function deleteGoal(id) {
   }
 }
 
+// ---------- Alerts ----------
+async function checkAlerts() {
+  const res = await apiPost('/api/alerts/check');
+  const el = document.getElementById('alertBanner');
+  if (!el || !res?.alerts?.length) {
+    if (el) el.classList.add('hidden');
+    return;
+  }
+
+  const alerts = res.alerts;
+  el.classList.remove('hidden');
+  el.innerHTML = alerts.map(a => {
+    const colors = {
+      warning: 'bg-amber-500/10 border-amber-500/30 text-amber-300',
+      critical: 'bg-red-500/10 border-red-500/30 text-red-300',
+      info: 'bg-blue-500/10 border-blue-500/30 text-blue-300'
+    };
+    const icons = { warning: 'fa-exclamation-triangle', critical: 'fa-times-circle', info: 'fa-info-circle' };
+    return `
+      <div class="flex items-start gap-3 p-3 rounded-lg border ${colors[a.type] || colors.info} mb-2">
+        <i class="fas ${icons[a.type] || icons.info} mt-0.5"></i>
+        <div class="flex-1">
+          <p class="font-medium text-sm">${a.title}</p>
+          <p class="text-xs opacity-80">${a.message}</p>
+        </div>
+        <button class="text-xs opacity-50 hover:opacity-100" onclick="this.parentElement.remove()">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>`;
+  }).join('');
+}
+
+function formatRupiahShort(num) {
+  num = Number(num) || 0;
+  if (num >= 1e9) return 'Rp ' + (num / 1e9).toFixed(1).replace('.', ',') + 'M';
+  if (num >= 1e6) return 'Rp ' + (num / 1e6).toFixed(1).replace('.', ',') + 'jt';
+  return 'Rp ' + num.toLocaleString('id-ID');
+}
+
+// ---------- Export ----------
+function exportCSV() {
+  const params = new URLSearchParams();
+  if (state.shop !== 'all') params.set('shop_id', state.shop);
+  if (state.channel !== 'all') params.set('channel', state.channel);
+  params.set('period', state.period);
+  window.open(`${API}/api/export/csv?${params.toString()}`, '_blank');
+  showToast('Export dimulai...', 'success');
+}
+
+// ---------- Calculator ----------
+function showCalculator() {
+  document.getElementById('calculatorModal').classList.remove('hidden');
+  // Pre-fill with current data
+  const d = state.affiliates;
+  const currentGmv = d.reduce((s, a) => s + Number(a.gmv || 0), 0);
+  const currentComm = d.reduce((s, a) => s + Number(a.commission || 0), 0);
+  document.getElementById('calcCurrentGmv').value = Math.round(currentGmv);
+}
+
+function closeCalculator() {
+  document.getElementById('calculatorModal').classList.add('hidden');
+}
+
+async function runCalculator() {
+  const currentGmv = Number(document.getElementById('calcCurrentGmv').value) || 0;
+  const targetGmv = Number(document.getElementById('calcTargetGmv').value) || 0;
+  const commRate = Number(document.getElementById('calcCommRate').value) || 6;
+  const aov = Number(document.getElementById('calcAov').value) || 300000;
+
+  if (!targetGmv) {
+    showToast('Isi target GMV terlebih dahulu', 'info');
+    return;
+  }
+
+  const res = await apiPost('/api/calculator/simulate', {
+    current_gmv: currentGmv, target_gmv: targetGmv,
+    avg_commission_rate: commRate, avg_order_value: aov
+  });
+
+  if (res?.error) {
+    showToast(res.error, 'info');
+    return;
+  }
+
+  document.getElementById('calcResult').classList.remove('hidden');
+  document.getElementById('calcProgress').textContent = res.progress_pct + '%';
+  document.getElementById('calcProgressBar').style.width = res.progress_pct + '%';
+  document.getElementById('calcOrdersGap').textContent = formatNumber(res.gap.orders) + ' order';
+  document.getElementById('calcGmvGap').textContent = formatRupiah(res.gap.gmv);
+  document.getElementById('calcCommTarget').textContent = formatRupiah(res.target.commission);
+}
+
 // ---------- Actions ----------
 function switchTab(tab) {
   state.tab = tab;
@@ -731,7 +823,7 @@ async function refreshAll() {
   if (btn) btn.disabled = true;
 
   await loadMode();
-  await Promise.all([loadShops(), loadAffiliates(), loadCampaigns(), loadTrend(), loadGoals()]);
+  await Promise.all([loadShops(), loadAffiliates(), loadCampaigns(), loadTrend(), loadGoals(), checkAlerts()]);
 
   if (icon) icon.classList.remove('fa-spin');
   if (btn) btn.disabled = false;
@@ -806,9 +898,18 @@ document.addEventListener('DOMContentLoaded', () => {
     loadCampaigns();
     loadTrend();
   });
-  document.getElementById('channelSelect')?.addEventListener('change', e => {
+  document.getElementById('channelSelect')?.addEventListener('change', async (e) => {
     state.channel = e.target.value;
-    loadAffiliates();
+    // Auto-sync for the selected channel (same as period filter)
+    const channelText = e.target.options[e.target.selectedIndex].text;
+    showToast('Sync data untuk channel ' + channelText + '...', 'info');
+    const syncRes = await apiPost('/api/sync/all', { period: state.period, channel: e.target.value });
+    if (syncRes?.total > 0) {
+      showToast(`Synced ${syncRes.total} afiliator`, 'success');
+    } else if (e.target.value !== 'all') {
+      showToast('Tidak ada data untuk channel ini di Shopee AMS', 'info');
+    }
+    await Promise.all([loadAffiliates(), loadTrend(), loadGoals()]);
   });
   document.getElementById('periodSelect')?.addEventListener('change', async (e) => {
     state.period = e.target.value;
