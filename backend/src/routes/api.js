@@ -349,9 +349,13 @@ router.get('/affiliates', async (req, res) => {
       if (shops.length && shops[0].access_token) {
         try {
           const token = await shopee.ensureValidToken(shops[0]);
+          // Shopee rejects the call without explicit dates ("startDate or endDate is empty").
+          const { startDate, endDate } = periodRange(period);
           const rows = await shopee.getAllAffiliatePerformance(shopId, token, {
             periodType: period,
             channel,
+            startDate,
+            endDate,
           });
 
           const list = rows.map((a) => ({
