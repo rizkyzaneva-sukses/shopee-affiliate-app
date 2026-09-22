@@ -483,12 +483,18 @@ function renderShopList() {
         </div>
         <div>
           <p class="font-medium text-sm text-slate-100">${s.shop_name || s.shop_id}</p>
-          <p class="text-xs text-slate-500">${s.region || '-'} · ${s.status || 'active'} · ${lastSync(s)}</p>
+          <p class="text-xs text-slate-500">${s.region || '-'} · ${s.status === 'expired'
+            ? '<span class="text-red-400 font-medium">token expired</span>'
+            : (s.status || 'active')} · ${lastSync(s)}</p>
         </div>
       </div>
+      ${s.status === 'expired' ? `
+      <button class="btn btn-primary text-xs" onclick="connectShop()">
+        <i class="fas fa-link"></i> Authorize ulang
+      </button>` : `
       <button class="btn btn-ghost text-xs" onclick="syncShop('${s.shop_id}')" id="syncBtn-${s.shop_id}">
         <i class="fas fa-sync-alt"></i> Sync
-      </button>
+      </button>`}
     </div>
   `).join('');
 }

@@ -1133,6 +1133,19 @@ router.post('/alerts/check', async (_req, res) => {
     `);
 
     const alerts = [];
+
+    const { rows: expiredShops } = await query(
+      `SELECT shop_id, shop_name FROM shops WHERE status = 'expired' ORDER BY shop_name`
+    );
+    if (expiredShops.length > 0) {
+      alerts.push({
+        type: 'critical',
+        title: 'Token Toko Expired',
+        message: `${expiredShops.map(sh => sh.shop_name || sh.shop_id).join(', ')} perlu diotorisasi ulang (menu Toko → Authorize ulang)`,
+        created_at: new Date().toISOString()
+      });
+    }
+
     const s = summary[0] || {};
     const gmv30 = Number(s.gmv_30d || 0);
     const gmv7ext = Number(s.gmv_7d_extrapolated || 0);

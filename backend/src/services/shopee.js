@@ -380,6 +380,18 @@ async function refreshAccessToken(shopId, refreshToken) {
   return res.json();
 }
 
+const TOKEN_BUFFER_MS = 30 * 60 * 1000; // 30 menit
+
+function isExpiring(tokenExpireAt, bufferMs) {
+  const expireAt = tokenExpireAt ? new Date(tokenExpireAt).getTime() : 0;
+  return Date.now() >= expireAt - bufferMs;
+}
+
+// One in-flight refresh per shop. Shopee rotates the refresh_token on every
+// refresh, so two parallel refreshes with the same token would make the
+// loser fail — concurrent callers share a single promise instead.
+const inflightRefresh = new Map();
+
 /**
  * Ensure token is valid, refresh if needed
  */
@@ -388,22 +400,61 @@ async function ensureValidToken(shop) {
     throw new Error(`Shop ${shop.shop_id} belum punya token. Lakukan authorization dulu.`);
   }
 
-  const expireAt = shop.token_expire_at ? new Date(shop.token_expire_at).getTime() : 0;
-  const bufferMs = 30 * 60 * 1000; // 30 menit
-
-  if (Date.now() < expireAt - bufferMs) {
+  if (!isExpiring(shop.token_expire_at, TOKEN_BUFFER_MS)) {
     return shop.access_token;
   }
 
-  // Refresh
+  return refreshShopToken(shop.shop_id, TOKEN_BUFFER_MS);
+}
+
+/**
+ * Refresh a shop's token if it expires within `bufferMs`. Safe to call
+ * concurrently; also used by the background scheduler.
+ */
+function refreshShopToken(shopId, bufferMs = TOKEN_BUFFER_MS) {
+  const key = String(shopId);
+  if (!inflightRefresh.has(key)) {
+    const p = doRefreshShopToken(shopId, bufferMs).finally(() => inflightRefresh.delete(key));
+    inflightRefresh.set(key, p);
+  }
+  return inflightRefresh.get(key);
+}
+
+async function doRefreshShopToken(shopId, bufferMs) {
+  // Re-read the row: the caller's copy may be stale if another request
+  // already rotated the token.
+  const { rows } = await query(
+    `SELECT shop_id, access_token, refresh_token, token_expire_at FROM shops WHERE shop_id = $1`,
+    [shopId]
+  );
+  const shop = rows[0];
+  if (!shop || !shop.refresh_token) {
+    throw new Error(`Shop ${shopId} belum punya token. Lakukan authorization dulu.`);
+  }
+  if (shop.access_token && !isExpiring(shop.token_expire_at, bufferMs)) {
+    return shop.access_token;
+  }
+
+  // Network errors propagate without touching status — only a Shopee
+  // rejection means the token itself is bad.
   const result = await refreshAccessToken(shop.shop_id, shop.refresh_token);
   if (result.error) {
-    throw new Error(`Refresh token gagal: ${result.message || result.error}`);
+    const msg = `Refresh token gagal: ${result.message || result.error}`;
+    await query(
+      `UPDATE shops SET status = 'expired', updated_at = NOW() WHERE shop_id = $1`,
+      [shop.shop_id]
+    );
+    await query(
+      `INSERT INTO sync_logs (shop_id, action, status, message) VALUES ($1, 'refresh_token', 'error', $2)`,
+      [shop.shop_id, msg]
+    ).catch(() => {});
+    throw new Error(msg);
   }
 
   const newExpire = new Date(Date.now() + (result.expire_in || 14400) * 1000);
   await query(
-    `UPDATE shops SET access_token = $1, refresh_token = $2, token_expire_at = $3, updated_at = NOW()
+    `UPDATE shops SET access_token = $1, refresh_token = $2, token_expire_at = $3,
+       status = CASE WHEN status = 'expired' THEN 'active' ELSE status END, updated_at = NOW()
      WHERE shop_id = $4`,
     [result.access_token, result.refresh_token || shop.refresh_token, newExpire, shop.shop_id]
   );
@@ -505,4 +556,5 @@ module.exports = {
   getOfferList,
   refreshAccessToken,
   ensureValidToken,
+  refreshShopToken,
 };

@@ -8,6 +8,7 @@ const path = require('path');
 const fs = require('fs');
 const apiRoutes = require('./routes/api');
 const { requireAdmin, getAdminToken } = require('./middleware/auth');
+const { startTokenScheduler } = require('./services/token-scheduler');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -78,4 +79,6 @@ app.listen(PORT, '0.0.0.0', () => {
   if (!process.env.SHOPEE_REDIRECT_URI) {
     console.warn('[WARN] SHOPEE_REDIRECT_URI belum diset — tombol "Hubungkan Toko" akan gagal.');
   }
+
+  startTokenScheduler();
 });
