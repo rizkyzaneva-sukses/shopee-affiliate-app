@@ -243,10 +243,8 @@ async function loadTrend(fresh = false) {
   params.set('period', state.period);
 
   const res = await apiGet('/api/dashboard/trend?' + params.toString());
-  if (res && res.labels) {
-    state.trend = res;
-    renderChart();
-  }
+  state.trend = res && res.labels ? res : { labels: [], gmv: [], orders: [], failed: true };
+  renderChart();
 }
 
 async function loadGoals() {
@@ -540,13 +538,22 @@ function renderChart() {
   // Use real trend data from API
   const t = state.trend;
 
+  // Update period label
+  const periodLabel = { Last7d: '7 hari', Last30d: '30 hari', Month: 'Bulan Ini' }[state.period] || '30 hari';
+  document.getElementById('trendPeriod').textContent = periodLabel;
+
   const note = document.getElementById('trendNote');
   if (note) {
     let msg = '';
-    if (t?.source === 'unavailable') {
-      msg = 'Data harian belum tersedia: transaksi dari Shopee tidak membawa tanggal order.';
+    if (t?.failed) {
+      msg = 'Gagal memuat tren harian (server error atau timeout). Coba klik Refresh.';
+    } else if (t?.source === 'unavailable') {
+      const d = t.diag || {};
+      msg = `Data harian belum terbaca — ${t.transactions} transaksi, ${d.dated} bertanggal, ` +
+        `${d.in_range} dalam rentang ${(d.range || []).join(' s/d ')}, ${d.with_amount} bernilai. ` +
+        `Contoh tanggal: ${JSON.stringify(d.sample_date)}. Field: ${(d.sample_keys || []).join(', ')}`;
     } else if (t?.errors?.length) {
-      msg = `Sebagian toko gagal dimuat (${t.errors.map(e => e.name || e.shop_id).join(', ')}) — grafik belum lengkap.`;
+      msg = `Toko gagal dimuat — ${t.errors.map(e => `${e.name || e.shop_id}: ${e.error}`).join('; ')}`;
     } else if (t?.source === 'transactions' && !t.transactions) {
       msg = 'Belum ada transaksi di periode ini.';
     }
@@ -554,7 +561,7 @@ function renderChart() {
     note.classList.toggle('hidden', !msg);
   }
 
-  if (!t || !t.labels || !t.labels.length || t.gmv.every(v => v === 0)) {
+  if (!t || !t.labels || !t.labels.length || (t.gmv.every(v => v === 0) && t.orders.every(v => v === 0))) {
     gmvChart = new Chart(canvas.getContext('2d'), {
       type: 'line',
       data: { labels: ['—'], datasets: [{ label: 'GMV', data: [0], borderColor: '#f97316', backgroundColor: 'transparent' }] },
@@ -569,10 +576,6 @@ function renderChart() {
     });
     return;
   }
-
-  // Update period label
-  const periodLabel = { Last7d: '7 hari', Last30d: '30 hari', Month: 'Bulan Ini' }[state.period] || '30 hari';
-  document.getElementById('trendPeriod').textContent = periodLabel;
 
   gmvChart = new Chart(canvas.getContext('2d'), {
     type: 'line',

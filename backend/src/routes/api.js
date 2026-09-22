@@ -527,6 +527,8 @@ async function buildLiveTrend(shopId, period) {
 
   const byDay = Object.fromEntries(keys.map(k => [k, { gmv: 0, commission: 0, orders: new Set(), rows: 0 }]));
   let dated = 0;
+  let inRange = 0;
+  let withAmount = 0;
   for (const t of txs) {
     const raw = pickField(t, TX_DATE_FIELDS);
     const key = raw === undefined ? null : jakartaDateKey(raw);
@@ -534,7 +536,10 @@ async function buildLiveTrend(shopId, period) {
     dated++;
     const day = byDay[key];
     if (!day) continue;
-    day.gmv += Number(pickField(t, TX_AMOUNT_FIELDS) || 0);
+    inRange++;
+    const amount = Number(pickField(t, TX_AMOUNT_FIELDS) || 0);
+    if (amount) withAmount++;
+    day.gmv += amount;
     day.commission += Number(pickField(t, TX_COMMISSION_FIELDS) || 0);
     const orderId = t.order_id ?? t.order_sn ?? t.sn;
     if (orderId !== undefined) day.orders.add(String(orderId)); else day.rows++;
@@ -547,15 +552,23 @@ async function buildLiveTrend(shopId, period) {
     commissions: keys.map(k => byDay[k].commission),
     source: 'transactions',
     transactions: txs.length,
+    // Counts at each stage, so an empty chart says which step lost the data.
+    diag: {
+      dated,
+      in_range: inRange,
+      with_amount: withAmount,
+      range: [keys[0], keys[keys.length - 1]],
+      sample_keys: txs.length ? Object.keys(txs[0]) : [],
+      sample_date: txs.length ? pickField(txs[0], TX_DATE_FIELDS) ?? null : null,
+    },
     errors,
   };
 
-  if (txs.length && !dated) {
-    // Transactions came back but none carried a recognisable date field —
-    // report what Shopee actually sent so the field list can be extended.
+  if (txs.length && (!dated || !inRange || !withAmount)) {
+    // Transactions came back but the date/amount fields didn't line up —
+    // report what Shopee actually sent so the field lists can be extended.
     result.source = 'unavailable';
-    result.sample_keys = Object.keys(txs[0]);
-    console.warn('[TREND] Tidak ada field tanggal dikenali. Field transaksi:', result.sample_keys.join(', '));
+    console.warn('[TREND] Data transaksi tidak terbaca:', JSON.stringify(result.diag));
   }
   return result;
 }
