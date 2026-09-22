@@ -163,17 +163,97 @@ async function shopeeRequest({ method = 'GET', path, shopId, accessToken, body =
   return data;
 }
 
+// ---------- Period ranges ----------
+
+/**
+ * AMS data lags behind the calendar (usually by a day), and every
+ * performance endpoint requires end_date == the latest data date for
+ * Last7d/Last30d/current Month — using "today" fails with
+ * "invalid time range". Cached per shop, since it moves once a day.
+ */
+const LATEST_DATE_TTL_MS = 30 * 60 * 1000;
+const latestDateCache = new Map();
+
+async function getLatestDataDate(shopId, accessToken) {
+  const key = String(shopId);
+  const hit = latestDateCache.get(key);
+  if (hit && Date.now() - hit.at < LATEST_DATE_TTL_MS) return hit.date;
+
+  const data = await shopeeRequest({
+    method: 'GET',
+    path: '/api/v2/ams/get_performance_data_update_time',
+    shopId,
+    accessToken,
+    queryParams: { marker_type: 'AmsMarker' },
+  });
+  const date = data.response?.last_report_date; // "YYYY-MM-DD"
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) {
+    throw new Error(`last_report_date tidak valid dari Shopee: ${JSON.stringify(date)}`);
+  }
+  latestDateCache.set(key, { at: Date.now(), date });
+  return date;
+}
+
+const ymd = (d) => d.toISOString().slice(0, 10).replace(/-/g, '');
+const addDays = (isoDate, n) => new Date(Date.parse(isoDate + 'T00:00:00Z') + n * 86400000);
+
+/**
+ * start_date/end_date (YYYYMMDD) that satisfy Shopee's alignment rules,
+ * given the latest data date (YYYY-MM-DD). "Month" is the month-to-date of
+ * the latest data date. "Day" takes an explicit date.
+ */
+function amsRange(periodType, latestDate, day) {
+  const end = addDays(latestDate, 0);
+  switch (periodType) {
+    case 'Day': {
+      const d = addDays(day || latestDate, 0);
+      return { startDate: ymd(d), endDate: ymd(d) };
+    }
+    case 'Last7d':
+      return { startDate: ymd(addDays(latestDate, -6)), endDate: ymd(end) };
+    case 'Month':
+      return { startDate: latestDate.slice(0, 8).replace(/-/g, '') + '01', endDate: ymd(end) };
+    case 'Last30d':
+    default:
+      return { startDate: ymd(addDays(latestDate, -29)), endDate: ymd(end) };
+  }
+}
+
+/** Resolve the range for a shop in one call. */
+async function shopRange(shopId, accessToken, periodType, day) {
+  const latest = await getLatestDataDate(shopId, accessToken);
+  return { ...amsRange(periodType, latest, day), latestDate: latest };
+}
+
+/**
+ * Walk a paginated AMS endpoint until has_more is false.
+ * `fetchPage(pageNo)` returns the raw Shopee reply; `listKey` names the array.
+ */
+async function fetchAllPages(fetchPage, { pageSize, listKey = 'list', maxPages = 200 } = {}) {
+  const all = [];
+  for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
+    const res = await fetchPage(pageNo);
+    const list = res.response?.[listKey] || [];
+    all.push(...list);
+    const total = res.response?.total_count;
+    if (res.response?.has_more === false || list.length < pageSize) break;
+    if (typeof total === 'number' && all.length >= total) break;
+  }
+  return all;
+}
+
 // ---------- High level helpers ----------
 
 /**
- * Shopee rejected page_size=100 with "invalid page_size", so the ceiling is
- * lower than the usual v2 limit. 50 is the documented default for AMS list
- * endpoints; override with SHOPEE_PAGE_SIZE if your app's quota differs.
+ * AMS performance endpoints (affiliate/product/content) accept page_size 1–20.
+ * SHOPEE_PAGE_SIZE may lower it, never raise it.
  */
+const AMS_MAX_PAGE_SIZE = 20;
+
 function getPageSize() {
-  const raw = Number(process.env.SHOPEE_PAGE_SIZE || 50);
-  if (!Number.isFinite(raw) || raw < 1) return 50;
-  return Math.min(Math.floor(raw), 50);
+  const raw = Number(process.env.SHOPEE_PAGE_SIZE || AMS_MAX_PAGE_SIZE);
+  if (!Number.isFinite(raw) || raw < 1) return AMS_MAX_PAGE_SIZE;
+  return Math.min(Math.floor(raw), AMS_MAX_PAGE_SIZE);
 }
 
 /**
@@ -230,7 +310,7 @@ async function getAffiliatePerformance(shopId, accessToken, opts = {}) {
     channel: normalizeChannel(channel),
     order_type: orderType,
     page_no: pageNo,
-    page_size: Math.min(Number(pageSize) || getPageSize(), 50),
+    page_size: Math.min(Number(pageSize) || getPageSize(), AMS_MAX_PAGE_SIZE),
   };
   if (startDate) queryParams.start_date = startDate;
   if (endDate) queryParams.end_date = endDate;
@@ -251,7 +331,7 @@ async function getAffiliatePerformance(shopId, accessToken, opts = {}) {
  * downwards once and remember what the API accepted for the rest of the
  * process lifetime.
  */
-const PAGE_SIZE_CANDIDATES = [50, 30, 20, 10, 5, 1];
+const PAGE_SIZE_CANDIDATES = [20, 10, 5, 1];
 let negotiatedPageSize = null;
 
 function isInvalidPageSizeError(err) {
@@ -311,9 +391,8 @@ async function getAllAffiliatePerformance(shopId, accessToken, opts = {}, maxPag
     const list = res.response?.list || [];
     all.push(...list);
 
-    // Stop on an explicit "no more pages" flag, or on a short/empty page.
-    const more = res.response?.more ?? res.response?.has_next_page;
-    if (more === false || list.length < pageSize) break;
+    // Stop on Shopee's has_more flag, or on a short/empty page.
+    if (res.response?.has_more === false || list.length < pageSize) break;
 
     if (pageNo === maxPages) {
       console.warn(`[SHOPEE] shop ${shopId}: berhenti di ${maxPages} halaman, mungkin masih ada sisa`);
@@ -350,13 +429,14 @@ async function getManagedAffiliateList(shopId, accessToken, pageNo = 1, pageSize
   });
 }
 
-async function getManagedCampaignList(shopId, accessToken, pageNo = 1, pageSize = getPageSize()) {
+/** Seller-created targeted campaigns (page_size 1–100). */
+async function getTargetedCampaignList(shopId, accessToken, pageNo = 1, pageSize = 100) {
   return shopeeRequest({
     method: 'GET',
-    path: '/api/v2/ams/get_managed_campaign_list',
+    path: '/api/v2/ams/get_targeted_campaign_list',
     shopId,
     accessToken,
-    queryParams: { page_no: pageNo, page_size: Math.min(Number(pageSize) || 50, 50) },
+    queryParams: { page_no: pageNo, page_size: Math.min(Number(pageSize) || 100, 100) },
   });
 }
 
@@ -463,78 +543,58 @@ async function doRefreshShopToken(shopId, bufferMs) {
 }
 
 
-// ---------- Product & Transaction APIs ----------
+// ---------- Shop / Product / Conversion APIs ----------
 
-/**
- * Get products available for affiliate promotion
- */
-async function getProductList(shopId, accessToken, opts = {}) {
-  const { pageNo = 1, pageSize = getPageSize(), keyword, sortOrder } = opts;
-  const queryParams = {
-    page_no: pageNo,
-    page_size: Math.min(Number(pageSize) || getPageSize(), 50),
-  };
-  if (keyword) queryParams.keyword = keyword;
-  if (sortOrder) queryParams.sort_order = sortOrder;
-
-  return shopeeRequest({
-    method: 'GET',
-    path: '/api/v2/ams/get_product_list',
-    shopId,
-    accessToken,
-    queryParams,
-  });
-}
-
-/**
- * Get detailed performance/transaction list (order-level)
- */
-async function getPerformanceList(shopId, accessToken, opts = {}) {
-  const {
-    periodType = 'Last30d',
-    startDate,
-    endDate,
-    channel = 'AllChannel',
-    orderType = 'ConfirmedOrder',
-    pageNo = 1,
-    pageSize = getPageSize(),
-  } = opts;
-
-  const queryParams = {
+function periodParams({ periodType, startDate, endDate, channel = 'AllChannel', orderType = 'ConfirmedOrder' }) {
+  return {
     period_type: periodType,
+    start_date: startDate,
+    end_date: endDate,
     channel: normalizeChannel(channel),
     order_type: orderType,
-    page_no: pageNo,
-    page_size: Math.min(Number(pageSize) || getPageSize(), 50),
   };
-  if (startDate) queryParams.start_date = startDate;
-  if (endDate) queryParams.end_date = endDate;
+}
 
+/** Shop-level totals for one period (use period_type=Day for a daily trend). */
+async function getShopPerformance(shopId, accessToken, opts) {
   return shopeeRequest({
     method: 'GET',
-    path: '/api/v2/ams/get_performance_list',
+    path: '/api/v2/ams/get_shop_performance',
+    shopId,
+    accessToken,
+    queryParams: periodParams(opts),
+  });
+}
+
+async function getProductPerformance(shopId, accessToken, opts, pageNo = 1) {
+  return shopeeRequest({
+    method: 'GET',
+    path: '/api/v2/ams/get_product_performance',
+    shopId,
+    accessToken,
+    queryParams: { ...periodParams(opts), page_no: pageNo, page_size: AMS_MAX_PAGE_SIZE },
+  });
+}
+
+/**
+ * Order-level conversions. page_size up to 500, page_no * page_size <= 10000.
+ * Time filters are unix seconds (inclusive).
+ */
+const CONVERSION_PAGE_SIZE = 500;
+
+async function getConversionReport(shopId, accessToken, { placeOrderTimeStart, placeOrderTimeEnd } = {}, pageNo = 1) {
+  const queryParams = { page_no: pageNo, page_size: CONVERSION_PAGE_SIZE };
+  if (placeOrderTimeStart) queryParams.place_order_time_start = placeOrderTimeStart;
+  if (placeOrderTimeEnd) queryParams.place_order_time_end = placeOrderTimeEnd;
+  return shopeeRequest({
+    method: 'GET',
+    path: '/api/v2/ams/get_conversion_report',
     shopId,
     accessToken,
     queryParams,
   });
 }
 
-/**
- * Get available offers from the marketplace
- */
-async function getOfferList(shopId, accessToken, opts = {}) {
-  const { pageNo = 1, pageSize = getPageSize() } = opts;
-  return shopeeRequest({
-    method: 'GET',
-    path: '/api/v2/ams/get_offer_list',
-    shopId,
-    accessToken,
-    queryParams: {
-      page_no: pageNo,
-      page_size: Math.min(Number(pageSize) || getPageSize(), 50),
-    },
-  });
-}
 module.exports = {
   getConfig,
   assertCredentials,
@@ -550,10 +610,16 @@ module.exports = {
   getAllAffiliatePerformance,
   probePageSizes,
   getManagedAffiliateList,
-  getManagedCampaignList,
-  getProductList,
-  getPerformanceList,
-  getOfferList,
+  getTargetedCampaignList,
+  getLatestDataDate,
+  amsRange,
+  shopRange,
+  fetchAllPages,
+  getShopPerformance,
+  getProductPerformance,
+  getConversionReport,
+  CONVERSION_PAGE_SIZE,
+  AMS_MAX_PAGE_SIZE,
   refreshAccessToken,
   ensureValidToken,
   refreshShopToken,

@@ -8,6 +8,7 @@
 
 const { query } = require('../db');
 const shopee = require('./shopee');
+const daily = require('./daily');
 
 const INTERVAL_MS = 60 * 60 * 1000; // tiap 1 jam
 // Refresh anything expiring before the next tick (plus margin), so the
@@ -48,10 +49,14 @@ function startTokenScheduler() {
     return;
   }
 
-  const run = () => refreshAll().catch((e) => console.error('[TOKEN] Scheduler error:', e.message));
+  // Tokens first (the daily prefill needs them), then the trend's daily rows.
+  const run = () => refreshAll()
+    .catch((e) => console.error('[TOKEN] Scheduler error:', e.message))
+    .then(() => daily.prefillAll())
+    .catch((e) => console.error('[DAILY] Prefill error:', e.message));
   setTimeout(run, STARTUP_DELAY_MS);
   setInterval(run, INTERVAL_MS);
-  console.log('[TOKEN] Auto-refresh token aktif (tiap 1 jam)');
+  console.log('[TOKEN] Auto-refresh token + data harian aktif (tiap 1 jam)');
 }
 
 module.exports = { startTokenScheduler, refreshAll };

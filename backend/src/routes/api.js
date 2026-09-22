@@ -2,29 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { query } = require('../db');
 const shopee = require('../services/shopee');
-
-const PERIOD_DAYS = { Last1d: 1, Last7d: 7, Last30d: 30 };
-
-/**
- * Resolve a period label into concrete dates.
- * Snapshots must carry start_date/end_date: they are part of the unique key,
- * and NULLs there make ON CONFLICT never match (Postgres treats NULL as
- * distinct), which would insert a duplicate row on every sync.
- */
-function periodRange(periodType) {
-  const fmt = (d) => d.toISOString().slice(0, 10).replace(/-/g, '');
-  const end = new Date();
-
-  // "Month" means month-to-date, not a rolling 30-day window.
-  if (periodType === 'Month') {
-    const start = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
-    return { startDate: fmt(start), endDate: fmt(end) };
-  }
-
-  const days = PERIOD_DAYS[periodType] || 30;
-  const start = new Date(end.getTime() - (days - 1) * 86400000);
-  return { startDate: fmt(start), endDate: fmt(end) };
-}
+const daily = require('../services/daily');
 
 /** Finite number or 0 — Shopee sometimes sends "NaN" (e.g. ROI with zero commission). */
 function num(v) {
@@ -81,12 +59,13 @@ async function latestSnapshotTotals(period, { shopId, channel = 'AllChannel' } =
 
 /** KPI totals over a full affiliate list (the table itself may be truncated). */
 function summarizeAffiliates(list) {
-  const t = { gmv: 0, orders: 0, commission: 0, clicks: 0, new_buyers: 0, total_buyers: 0, affiliates: list.length, active: 0 };
+  const t = { gmv: 0, orders: 0, commission: 0, clicks: 0, items_sold: 0, new_buyers: 0, total_buyers: 0, affiliates: list.length, active: 0 };
   for (const a of list) {
     t.gmv += num(a.gmv);
     t.orders += num(a.orders);
     t.commission += num(a.commission);
     t.clicks += num(a.clicks);
+    t.items_sold += num(a.items_sold);
     t.new_buyers += num(a.new_buyers);
     t.total_buyers += num(a.total_buyers);
     if ((a.status || 'active') === 'active') t.active++;
@@ -293,6 +272,52 @@ router.post('/shops/discover', async (_req, res) => {
 });
 
 /**
+ * Pull one shop's affiliate performance for a period and store it as a
+ * snapshot keyed by the exact date range Shopee was asked for.
+ */
+async function syncShopAffiliates(shop, periodType, channelRaw) {
+  const token = await shopee.ensureValidToken(shop);
+  const channel = shopee.normalizeChannel(channelRaw);
+  const { startDate, endDate } = await shopee.shopRange(shop.shop_id, token, periodType);
+
+  const list = await shopee.getAllAffiliatePerformance(shop.shop_id, token, { periodType, channel, startDate, endDate });
+
+  for (const a of list) {
+    await query(
+      `INSERT INTO affiliates (affiliate_id, shop_id, name, username, channel, status)
+       VALUES ($1, $2, $3, $4, $5, 'active')
+       ON CONFLICT (affiliate_id, shop_id) DO UPDATE SET
+         name = EXCLUDED.name,
+         username = EXCLUDED.username,
+         channel = EXCLUDED.channel,
+         updated_at = NOW()`,
+      [a.affiliate_id, shop.shop_id, a.affiliate_name, a.affiliate_username, channel]
+    );
+
+    await query(
+      `INSERT INTO affiliate_performance
+         (affiliate_id, shop_id, period_type, start_date, end_date, channel,
+          gmv, orders, clicks, items_sold, est_commission, roi, total_buyers, new_buyers, synced_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
+       ON CONFLICT (affiliate_id, shop_id, period_type, start_date, end_date, channel)
+       DO UPDATE SET
+         gmv = EXCLUDED.gmv, orders = EXCLUDED.orders, clicks = EXCLUDED.clicks,
+         items_sold = EXCLUDED.items_sold,
+         est_commission = EXCLUDED.est_commission, roi = EXCLUDED.roi,
+         total_buyers = EXCLUDED.total_buyers, new_buyers = EXCLUDED.new_buyers,
+         synced_at = NOW()`,
+      [a.affiliate_id, shop.shop_id, periodType, startDate, endDate, channel,
+       num(a.sales), num(a.orders), num(a.clicks), num(a.items_sold),
+       num(a.est_commission), num(a.roi),
+       num(a.total_buyers), num(a.new_buyers)]
+    );
+  }
+
+  await query(`UPDATE shops SET last_sync_at = NOW() WHERE shop_id = $1`, [shop.shop_id]);
+  return list.length;
+}
+
+/**
  * Sync all shops in one call — iterates each shop and syncs affiliate
  * performance. Useful for "Sync Semua" button on the frontend.
  */
@@ -306,51 +331,13 @@ router.post('/sync/all', async (req, res) => {
     const { rows: shops } = await query(`SELECT * FROM shops WHERE status = 'active' ORDER BY shop_name`);
     if (!shops.length) return res.json({ message: 'Tidak ada toko aktif.', synced: 0 });
 
+    const periodType = req.body?.period || 'Last30d';
     let totalSynced = 0;
     const results = [];
 
     for (const shop of shops) {
       try {
-        const token = await shopee.ensureValidToken(shop);
-        const periodType = req.body?.period || 'Last30d';
-        const channel = shopee.normalizeChannel(req.body?.channel);
-        const { startDate, endDate } = periodRange(periodType);
-
-        const list = await shopee.getAllAffiliatePerformance(shop.shop_id, token, { periodType, channel, startDate, endDate });
-        let count = 0;
-
-        for (const a of list) {
-          await query(
-            `INSERT INTO affiliates (affiliate_id, shop_id, name, username, channel, status)
-             VALUES ($1, $2, $3, $4, $5, 'active')
-             ON CONFLICT (affiliate_id, shop_id) DO UPDATE SET
-               name = EXCLUDED.name,
-               username = EXCLUDED.username,
-               channel = EXCLUDED.channel,
-               updated_at = NOW()`,
-            [a.affiliate_id, shop.shop_id, a.affiliate_name, a.affiliate_username, channel]
-          );
-
-          await query(
-            `INSERT INTO affiliate_performance
-               (affiliate_id, shop_id, period_type, start_date, end_date, channel,
-                gmv, orders, clicks, est_commission, roi, total_buyers, new_buyers, synced_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
-             ON CONFLICT (affiliate_id, shop_id, period_type, start_date, end_date, channel)
-             DO UPDATE SET
-               gmv = EXCLUDED.gmv, orders = EXCLUDED.orders, clicks = EXCLUDED.clicks,
-               est_commission = EXCLUDED.est_commission, roi = EXCLUDED.roi,
-               total_buyers = EXCLUDED.total_buyers, new_buyers = EXCLUDED.new_buyers,
-               synced_at = NOW()`,
-            [a.affiliate_id, shop.shop_id, periodType, startDate, endDate, channel,
-             num(a.sales), num(a.orders), num(a.clicks),
-             num(a.est_commission), num(a.roi),
-             num(a.total_buyers), num(a.new_buyers)]
-          );
-          count++;
-        }
-
-        await query(`UPDATE shops SET last_sync_at = NOW() WHERE shop_id = $1`, [shop.shop_id]);
+        const count = await syncShopAffiliates(shop, periodType, req.body?.channel);
         totalSynced += count;
         results.push({ shop_id: shop.shop_id, name: shop.shop_name, synced: count });
       } catch (e) {
@@ -435,8 +422,8 @@ router.get('/affiliates', async (req, res) => {
       if (shops.length && shops[0].access_token) {
         try {
           const token = await shopee.ensureValidToken(shops[0]);
-          // Shopee rejects the call without explicit dates ("startDate or endDate is empty").
-          const { startDate, endDate } = periodRange(period);
+          // end_date must be Shopee's latest data date, not today.
+          const { startDate, endDate } = await shopee.shopRange(shopId, token, period);
           const rows = await shopee.getAllAffiliatePerformance(shopId, token, {
             periodType: period,
             channel,
@@ -453,6 +440,7 @@ router.get('/affiliates', async (req, res) => {
             gmv: num(a.sales),
             orders: num(a.orders),
             clicks: num(a.clicks),
+            items_sold: num(a.items_sold),
             commission: num(a.est_commission),
             roi: num(a.roi),
             total_buyers: num(a.total_buyers),
@@ -475,7 +463,7 @@ router.get('/affiliates', async (req, res) => {
     const params = [period, channel];
     let sql = `
       SELECT a.affiliate_id, a.name, a.username, a.status, a.followers, a.shop_id, a.last_active_at,
-             s.shop_name, p.channel, p.gmv, p.orders, p.clicks,
+             s.shop_name, p.channel, p.gmv, p.orders, p.clicks, p.items_sold,
              p.est_commission AS commission, p.roi, p.total_buyers, p.new_buyers
       FROM (${LATEST_SNAPSHOT_SQL}) p
       JOIN affiliates a ON a.affiliate_id = p.affiliate_id AND a.shop_id = p.shop_id
@@ -492,6 +480,7 @@ router.get('/affiliates', async (req, res) => {
       gmv: num(r.gmv),
       orders: num(r.orders),
       clicks: num(r.clicks),
+      items_sold: num(r.items_sold),
       commission: num(r.commission),
       roi: num(r.roi),
       total_buyers: num(r.total_buyers),
@@ -508,13 +497,13 @@ router.get('/affiliates', async (req, res) => {
 router.get('/campaigns', async (req, res) => {
   try {
     const shopId = req.query.shop_id;
-    let sql = `SELECT * FROM campaigns`;
+    let sql = `SELECT c.*, s.shop_name FROM campaigns c LEFT JOIN shops s ON s.shop_id = c.shop_id`;
     const params = [];
     if (shopId && shopId !== 'all') {
-      sql += ` WHERE shop_id = $1`;
+      sql += ` WHERE c.shop_id = $1`;
       params.push(shopId);
     }
-    sql += ` ORDER BY updated_at DESC LIMIT 50`;
+    sql += ` ORDER BY c.period_start DESC NULLS LAST, c.updated_at DESC LIMIT 100`;
     const { rows } = await query(sql, params);
     res.json({ data: rows });
   } catch (e) {
@@ -524,202 +513,27 @@ router.get('/campaigns', async (req, res) => {
 
 // ---------- Dashboard Trend (daily GMV/orders) ----------
 
-// Shopee's affiliate-performance totals cover a whole period, so a daily
-// trend has to be rebuilt from order-level transactions. The response field
-// names are not documented publicly, hence the candidate lists.
-const TX_DATE_FIELDS = ['order_time', 'create_time', 'purchase_time', 'order_create_time',
-  'order_created_time', 'ctime', 'order_date', 'complete_time', 'date'];
-const TX_AMOUNT_FIELDS = ['payment_amount', 'gmv', 'amount', 'order_amount', 'purchase_value', 'sales'];
-const TX_COMMISSION_FIELDS = ['estimated_commission', 'est_commission', 'commission'];
-
-const TREND_CACHE_MS = 10 * 60 * 1000;
-const trendCache = new Map();
-
-function pickField(obj, fields) {
-  for (const f of fields) {
-    if (obj[f] !== undefined && obj[f] !== null && obj[f] !== '') return obj[f];
-  }
-  return undefined;
-}
-
-/** Jakarta calendar date (YYYY-MM-DD) of a unix-seconds/ms/date-string value. */
-function jakartaDateKey(value) {
-  let ms;
-  if (typeof value === 'number' || /^\d+$/.test(String(value))) {
-    const n = Number(value);
-    ms = n < 1e12 ? n * 1000 : n;
-  } else {
-    ms = Date.parse(value);
-  }
-  if (!Number.isFinite(ms)) return null;
-  return new Date(ms + 7 * 3600 * 1000).toISOString().slice(0, 10);
-}
-
-async function fetchAllTransactions(shop, period, maxPages = 100) {
-  const token = await shopee.ensureValidToken(shop);
-  const { startDate, endDate } = periodRange(period);
-  const all = [];
-  for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
-    const data = await shopee.getPerformanceList(shop.shop_id, token, {
-      periodType: period, startDate, endDate, pageNo, pageSize: 50,
-    });
-    const list = data.response?.list || data.response?.performance_list || [];
-    all.push(...list);
-    const more = data.response?.more ?? data.response?.has_next_page;
-    if (more === false || list.length < 50) break;
-  }
-  return all;
-}
-
-async function buildLiveTrend(shopId, period) {
-  const shops = await resolveShops(shopId);
-
-  const txs = [];
-  const errors = [];
-  await Promise.all(shops.map(async (shop) => {
-    try {
-      txs.push(...await fetchAllTransactions(shop, period));
-    } catch (e) {
-      console.warn(`[TREND] Shop ${shop.shop_id} gagal:`, e.message);
-      errors.push({ shop_id: shop.shop_id, name: shop.shop_name, error: e.message });
-    }
-  }));
-
-  // Day range in Jakarta time, from the period start through today.
-  const { startDate } = periodRange(period);
-  const startKey = `${startDate.slice(0, 4)}-${startDate.slice(4, 6)}-${startDate.slice(6, 8)}`;
-  const todayKey = jakartaDateKey(Date.now());
-  const keys = [];
-  for (let d = new Date(startKey + 'T00:00:00Z'); d.toISOString().slice(0, 10) <= todayKey; d = new Date(d.getTime() + 86400000)) {
-    keys.push(d.toISOString().slice(0, 10));
-  }
-
-  const byDay = Object.fromEntries(keys.map(k => [k, { gmv: 0, commission: 0, orders: new Set(), rows: 0 }]));
-  let dated = 0;
-  let inRange = 0;
-  let withAmount = 0;
-  for (const t of txs) {
-    const raw = pickField(t, TX_DATE_FIELDS);
-    const key = raw === undefined ? null : jakartaDateKey(raw);
-    if (!key) continue;
-    dated++;
-    const day = byDay[key];
-    if (!day) continue;
-    inRange++;
-    const amount = Number(pickField(t, TX_AMOUNT_FIELDS) || 0);
-    if (amount) withAmount++;
-    day.gmv += amount;
-    day.commission += Number(pickField(t, TX_COMMISSION_FIELDS) || 0);
-    const orderId = t.order_id ?? t.order_sn ?? t.sn;
-    if (orderId !== undefined) day.orders.add(String(orderId)); else day.rows++;
-  }
-
-  const result = {
-    labels: keys.map(k => new Date(k + 'T00:00:00Z').toLocaleDateString('id-ID', { day: 'numeric', month: 'short', timeZone: 'UTC' })),
-    gmv: keys.map(k => byDay[k].gmv / 1e6), // convert to millions
-    orders: keys.map(k => byDay[k].orders.size + byDay[k].rows),
-    commissions: keys.map(k => byDay[k].commission),
-    source: 'transactions',
-    transactions: txs.length,
-    // Counts at each stage, so an empty chart says which step lost the data.
-    diag: {
-      dated,
-      in_range: inRange,
-      with_amount: withAmount,
-      range: [keys[0], keys[keys.length - 1]],
-      sample_keys: txs.length ? Object.keys(txs[0]) : [],
-      sample_date: txs.length ? pickField(txs[0], TX_DATE_FIELDS) ?? null : null,
-    },
-    errors,
-  };
-
-  if (txs.length && (!dated || !inRange || !withAmount)) {
-    // Transactions came back but the date/amount fields didn't line up —
-    // report what Shopee actually sent so the field lists can be extended.
-    result.source = 'unavailable';
-    console.warn('[TREND] Data transaksi tidak terbaca:', JSON.stringify(result.diag));
-  }
-  return result;
-}
-
+// Sums of shop_daily_performance (filled from get_shop_performance, Day).
 router.get('/dashboard/trend', async (req, res) => {
   try {
-    if ((process.env.APP_MODE || 'mock') === 'live') {
-      const period = req.query.period || 'Last30d';
-      const cacheKey = `${req.query.shop_id || 'all'}|${period}`;
-      const hit = trendCache.get(cacheKey);
-      if (hit && Date.now() - hit.at < TREND_CACHE_MS && req.query.fresh !== '1') {
-        return res.json(hit.data);
-      }
-      const data = await buildLiveTrend(req.query.shop_id, period);
-      if (!data.errors.length) trendCache.set(cacheKey, { at: Date.now(), data });
-      return res.json(data);
+    if ((process.env.APP_MODE || 'mock') !== 'live') {
+      return res.json({ labels: [], gmv: [], orders: [], commissions: [], source: 'mock' });
     }
 
-    // Mock mode: approximate from stored snapshots.
-    const shopId = req.query.shop_id;
     const period = req.query.period || 'Last30d';
-    const days = { Last7d: 7, Last30d: 30, Month: 30 }[period] || 30;
+    const channel = shopee.normalizeChannel(req.query.channel && req.query.channel !== 'all' ? req.query.channel : null);
+    const shops = await resolveShops(req.query.shop_id);
+    const { days, rows, errors, latest } = await daily.dailySeries(shops, period, channel);
 
-    const fmt = (d) => d.toISOString().slice(0, 10).replace(/-/g, '');
-    const end = new Date();
-    const start = new Date(end.getTime() - (days - 1) * 86400000);
-
-    // Aggregate GMV/orders per day using synced_at date
-    let sql = `
-      SELECT
-        TO_CHAR(synced_at AT TIME ZONE 'Asia/Jakarta', 'DD Mon') AS label,
-        TO_CHAR(synced_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS date_key,
-        SUM(gmv) AS gmv,
-        SUM(orders) AS orders,
-        SUM(est_commission) AS commission,
-        SUM(clicks) AS clicks,
-        COUNT(DISTINCT affiliate_id) AS affiliates
-      FROM affiliate_performance
-      WHERE synced_at >= $1
-        AND synced_at < ($2::date + INTERVAL '1 day')
-    `;
-    const params = [start, end];
-    let idx = 3;
-
-    if (shopId && shopId !== 'all') {
-      sql += ` AND shop_id = $${idx++}`;
-      params.push(shopId);
-    }
-
-    sql += ` GROUP BY date_key, label ORDER BY date_key`;
-
-    const { rows } = await query(sql, params);
-
-    // Fill in missing days with zeros
-    const dataMap = {};
-    for (const r of rows) {
-      dataMap[r.date_key] = {
-        label: r.label,
-        gmv: Number(r.gmv || 0),
-        orders: Number(r.orders || 0),
-        commission: Number(r.commission || 0),
-        clicks: Number(r.clicks || 0),
-        affiliates: Number(r.affiliates || 0),
-      };
-    }
-
-    const labels = [];
-    const gmv = [];
-    const orders = [];
-    const commissions = [];
-    for (let i = 0; i < days; i++) {
-      const d = new Date(start.getTime() + i * 86400000);
-      const key = d.toISOString().slice(0, 10);
-      const shortLabel = d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' });
-      const entry = dataMap[key];
-      labels.push(shortLabel);
-      gmv.push(entry ? entry.gmv / 1e6 : 0); // convert to millions
-      orders.push(entry ? entry.orders : 0);
-      commissions.push(entry ? entry.commission : 0);
-    }
-
-    res.json({ labels, gmv, orders, commissions });
+    res.json({
+      labels: days.map(d => new Date(d + 'T00:00:00Z').toLocaleDateString('id-ID', { day: 'numeric', month: 'short', timeZone: 'UTC' })),
+      gmv: days.map(d => (rows[d]?.sales || 0) / 1e6), // millions
+      orders: days.map(d => rows[d]?.orders || 0),
+      commissions: days.map(d => rows[d]?.commission || 0),
+      source: 'shop_daily',
+      latest_date: latest,
+      errors,
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -812,71 +626,8 @@ router.post('/sync/:shopId', async (req, res) => {
     const { rows } = await query(`SELECT * FROM shops WHERE shop_id = $1`, [shopId]);
     if (!rows.length) return res.status(404).json({ error: 'Shop not found' });
 
-    const shop = rows[0];
-    const token = await shopee.ensureValidToken(shop);
+    const upserted = await syncShopAffiliates(rows[0], req.body?.period || 'Last30d', req.body?.channel);
 
-    const periodType = req.body?.period || 'Last30d';
-    const channel = shopee.normalizeChannel(req.body?.channel);
-    const { startDate, endDate } = periodRange(periodType);
-
-    // Fetch every page — page_size is capped at 50, so one call is not enough.
-    const list = await shopee.getAllAffiliatePerformance(shopId, token, {
-      periodType,
-      channel,
-      startDate,
-      endDate,
-    });
-    let upserted = 0;
-
-    for (const a of list) {
-      // Upsert affiliate
-      await query(
-        `INSERT INTO affiliates (affiliate_id, shop_id, name, username, channel, status)
-         VALUES ($1, $2, $3, $4, $5, 'active')
-         ON CONFLICT (affiliate_id, shop_id) DO UPDATE SET
-           name = EXCLUDED.name,
-           username = EXCLUDED.username,
-           channel = EXCLUDED.channel,
-           updated_at = NOW()`,
-        [a.affiliate_id, shopId, a.affiliate_name, a.affiliate_username, channel]
-      );
-
-      // Upsert performance
-      await query(
-        `INSERT INTO affiliate_performance
-           (affiliate_id, shop_id, period_type, start_date, end_date, channel,
-            gmv, orders, clicks, est_commission, roi, total_buyers, new_buyers, synced_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
-         ON CONFLICT (affiliate_id, shop_id, period_type, start_date, end_date, channel)
-         DO UPDATE SET
-           gmv = EXCLUDED.gmv,
-           orders = EXCLUDED.orders,
-           clicks = EXCLUDED.clicks,
-           est_commission = EXCLUDED.est_commission,
-           roi = EXCLUDED.roi,
-           total_buyers = EXCLUDED.total_buyers,
-           new_buyers = EXCLUDED.new_buyers,
-           synced_at = NOW()`,
-        [
-          a.affiliate_id,
-          shopId,
-          periodType,
-          startDate,
-          endDate,
-          channel,
-          num(a.sales),
-          num(a.orders),
-          num(a.clicks),
-          num(a.est_commission),
-          num(a.roi),
-          num(a.total_buyers),
-          num(a.new_buyers),
-        ]
-      );
-      upserted++;
-    }
-
-    await query(`UPDATE shops SET last_sync_at = NOW() WHERE shop_id = $1`, [shopId]);
     await query(
       `INSERT INTO sync_logs (shop_id, action, status, message) VALUES ($1, 'sync_performance', 'success', $2)`,
       [shopId, `Synced ${upserted} affiliates`]
@@ -893,81 +644,69 @@ router.post('/sync/:shopId', async (req, res) => {
 });
 
 // ---------- Campaign sync ----------
+
+// period_end_time 32503651199 (2999-12-31) means "no end date".
+const NO_END_TIME = 32503651199;
+const unixToDate = (v) => (v && Number(v) < NO_END_TIME ? new Date(Number(v) * 1000) : null);
+
 /**
- * Sync campaigns for a single shop from the Shopee AMS API.
- * Stores them in the campaigns table (upsert by campaign_id + shop_id).
+ * Store a shop's seller-created targeted campaigns. Campaigns no longer
+ * returned by Shopee are removed so the list mirrors Seller Center.
  */
-router.post('/sync/campaigns/:shopId', async (req, res) => {
-  const shopId = req.params.shopId;
-  const mode = process.env.APP_MODE || 'mock';
-  if (mode !== 'live') {
-    return res.json({ message: 'Mode mock — sync campaigns dilewati.', synced: 0 });
+async function syncShopCampaigns(shop) {
+  const token = await shopee.ensureValidToken(shop);
+  const pageSize = 100;
+  const list = [];
+  for (let pageNo = 1; pageNo <= 50; pageNo++) {
+    const r = await shopee.getTargetedCampaignList(shop.shop_id, token, pageNo, pageSize);
+    const page = r.response?.campaign_list || [];
+    list.push(...page);
+    const total = r.response?.total_count;
+    if (page.length < pageSize || (typeof total === 'number' && list.length >= total)) break;
   }
 
+  const ids = [];
+  for (const c of list) {
+    if (!c.campaign_id) continue;
+    ids.push(c.campaign_id);
+    const rate = c.min_rate == null ? null
+      : Number(c.min_rate) === Number(c.max_rate) ? `${c.min_rate}%` : `${c.min_rate}–${c.max_rate}%`;
+    await query(
+      `INSERT INTO campaigns (campaign_id, shop_id, name, type, status, commission_info,
+                              products_count, affiliates_count, period_start, period_end, raw_data)
+       VALUES ($1, $2, $3, 'Targeted', $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (campaign_id, shop_id) DO UPDATE SET
+         name = EXCLUDED.name, type = EXCLUDED.type, status = EXCLUDED.status,
+         commission_info = EXCLUDED.commission_info,
+         products_count = EXCLUDED.products_count, affiliates_count = EXCLUDED.affiliates_count,
+         period_start = EXCLUDED.period_start, period_end = EXCLUDED.period_end,
+         raw_data = EXCLUDED.raw_data, updated_at = NOW()`,
+      [c.campaign_id, shop.shop_id, c.campaign_name || null, c.campaign_status || null, rate,
+       num(c.item_count), num(c.affiliate_count),
+       unixToDate(c.period_start_time), unixToDate(c.period_end_time), JSON.stringify(c)]
+    );
+  }
+  await query(
+    `DELETE FROM campaigns WHERE shop_id = $1 AND NOT (campaign_id = ANY($2::bigint[]))`,
+    [shop.shop_id, ids]
+  );
+  return ids.length;
+}
+
+router.post('/sync/campaigns/:shopId', async (req, res) => {
+  if ((process.env.APP_MODE || 'mock') !== 'live') {
+    return res.json({ message: 'Mode mock — sync campaigns dilewati.', synced: 0 });
+  }
+  const shopId = req.params.shopId;
   try {
     const { rows } = await query(`SELECT * FROM shops WHERE shop_id = $1`, [shopId]);
     if (!rows.length) return res.status(404).json({ error: 'Shop not found' });
-
-    const shop = rows[0];
-    const token = await shopee.ensureValidToken(shop);
-
-    // Fetch all pages of campaigns
-    let pageNo = 1;
-    let allCampaigns = [];
-    const pageSize = 50;
-    while (true) {
-      const res2 = await shopee.getManagedCampaignList(shopId, token, pageNo, pageSize);
-      const list = res2.response?.campaign_list || res2.response?.list || [];
-      allCampaigns.push(...list);
-      const more = res2.response?.more ?? res2.response?.has_next_page;
-      if (more === false || list.length < pageSize) break;
-      pageNo++;
-      if (pageNo > 50) break; // safety limit
-    }
-
-    let upserted = 0;
-    for (const c of allCampaigns) {
-      const campaignId = c.campaign_id || c.id;
-      if (!campaignId) continue;
-
-      await query(
-        `INSERT INTO campaigns (campaign_id, shop_id, name, type, status, commission_info,
-                                products_count, affiliates_count, period_start, period_end, raw_data)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-         ON CONFLICT (campaign_id, shop_id) DO UPDATE SET
-           name = EXCLUDED.name,
-           type = EXCLUDED.type,
-           status = EXCLUDED.status,
-           commission_info = EXCLUDED.commission_info,
-           products_count = EXCLUDED.products_count,
-           affiliates_count = EXCLUDED.affiliates_count,
-           period_start = EXCLUDED.period_start,
-           period_end = EXCLUDED.period_end,
-           raw_data = EXCLUDED.raw_data,
-           updated_at = NOW()`,
-        [
-          campaignId,
-          shopId,
-          c.name || c.campaign_name || null,
-          c.type || c.campaign_type || null,
-          c.status || c.campaign_status || null,
-          c.commission_info || c.commission_rate || null,
-          c.products_count || 0,
-          c.affiliates_count || 0,
-          c.period_start || c.start_time || null,
-          c.period_end || c.end_time || null,
-          JSON.stringify(c),
-        ]
-      );
-      upserted++;
-    }
-
+    const synced = await syncShopCampaigns(rows[0]);
     await query(
       `INSERT INTO sync_logs (shop_id, action, status, message) VALUES ($1, 'sync_campaigns', 'success', $2)`,
-      [shopId, `Synced ${upserted} campaigns for shop ${shopId}`]
+      [shopId, `Synced ${synced} campaigns`]
     ).catch(() => {});
-
-    res.json({ success: true, synced: upserted, total_fetched: allCampaigns.length });
+    res.json({ success: true, synced });
   } catch (e) {
     await query(
       `INSERT INTO sync_logs (shop_id, action, status, message) VALUES ($1, 'sync_campaigns', 'error', $2)`,
@@ -977,95 +716,30 @@ router.post('/sync/campaigns/:shopId', async (req, res) => {
   }
 });
 
-/**
- * Sync campaigns for ALL active shops.
- */
-router.get('/campaigns/sync-all', async (_req, res) => {
-  const mode = process.env.APP_MODE || 'mock';
-  if (mode !== 'live') {
+/** Sync campaigns for ALL active shops. */
+router.post('/campaigns/sync-all', async (_req, res) => {
+  if ((process.env.APP_MODE || 'mock') !== 'live') {
     return res.json({ message: 'Mode mock — sync campaigns dilewati.', synced: 0 });
   }
-
   try {
     const { rows: shops } = await query(`SELECT * FROM shops WHERE status = 'active' ORDER BY shop_name`);
-    if (!shops.length) return res.json({ message: 'Tidak ada toko aktif.', synced: 0 });
-
-    let totalSynced = 0;
+    let total = 0;
     const results = [];
-
     for (const shop of shops) {
       try {
-        const token = await shopee.ensureValidToken(shop);
-
-        let pageNo = 1;
-        let allCampaigns = [];
-        const pageSize = 50;
-        while (true) {
-          const res2 = await shopee.getManagedCampaignList(shop.shop_id, token, pageNo, pageSize);
-          const list = res2.response?.campaign_list || res2.response?.list || [];
-          allCampaigns.push(...list);
-          const more = res2.response?.more ?? res2.response?.has_next_page;
-          if (more === false || list.length < pageSize) break;
-          pageNo++;
-          if (pageNo > 50) break;
-        }
-
-        let count = 0;
-        for (const c of allCampaigns) {
-          const campaignId = c.campaign_id || c.id;
-          if (!campaignId) continue;
-
-          await query(
-            `INSERT INTO campaigns (campaign_id, shop_id, name, type, status, commission_info,
-                                    products_count, affiliates_count, period_start, period_end, raw_data)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-             ON CONFLICT (campaign_id, shop_id) DO UPDATE SET
-               name = EXCLUDED.name,
-               type = EXCLUDED.type,
-               status = EXCLUDED.status,
-               commission_info = EXCLUDED.commission_info,
-               products_count = EXCLUDED.products_count,
-               affiliates_count = EXCLUDED.affiliates_count,
-               period_start = EXCLUDED.period_start,
-               period_end = EXCLUDED.period_end,
-               raw_data = EXCLUDED.raw_data,
-               updated_at = NOW()`,
-            [
-              campaignId,
-              shop.shop_id,
-              c.name || c.campaign_name || null,
-              c.type || c.campaign_type || null,
-              c.status || c.campaign_status || null,
-              c.commission_info || c.commission_rate || null,
-              c.products_count || 0,
-              c.affiliates_count || 0,
-              c.period_start || c.start_time || null,
-              c.period_end || c.end_time || null,
-              JSON.stringify(c),
-            ]
-          );
-          count++;
-        }
-        totalSynced += count;
-        results.push({ shop_id: shop.shop_id, name: shop.shop_name, synced: count });
+        const synced = await syncShopCampaigns(shop);
+        total += synced;
+        results.push({ shop_id: shop.shop_id, name: shop.shop_name, synced });
       } catch (e) {
         console.error(`[CAMPAIGN-SYNC-ALL] Shop ${shop.shop_id} gagal:`, e.message);
         results.push({ shop_id: shop.shop_id, name: shop.shop_name, error: e.message });
       }
     }
-
-    await query(
-      `INSERT INTO sync_logs (shop_id, action, status, message) VALUES (0, 'sync_campaigns_all', 'success', $1)`,
-      [`Synced ${totalSynced} campaigns from ${shops.length} shops`]
-    ).catch(() => {});
-
-    res.json({ success: true, total: totalSynced, shops: results });
+    res.json({ success: true, total, shops: results });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
-
-
 
 /** The selected shop, or every active shop for "all". */
 async function resolveShops(shopId) {
@@ -1101,22 +775,33 @@ router.get('/products', async (req, res) => {
       return res.json({ data: [], source: 'mock' });
     }
 
+    const period = req.query.period || 'Last30d';
+    const channel = shopee.normalizeChannel(req.query.channel && req.query.channel !== 'all' ? req.query.channel : null);
     const shops = await resolveShops(req.query.shop_id);
     if (!shops.length) return res.json({ data: [], source: 'empty' });
 
     const { data, errors } = await collectFromShops(shops, async (shop) => {
       const token = await shopee.ensureValidToken(shop);
-      const all = [];
-      for (let pageNo = 1; pageNo <= 10; pageNo++) { // safety limit
-        const page = await shopee.getProductList(shop.shop_id, token, { pageNo, pageSize: 50 });
-        const list = page.response?.list || page.response?.product_list || [];
-        all.push(...list);
-        const more = page.response?.more ?? page.response?.has_next_page;
-        if (more === false || list.length < 50) break;
-      }
-      return all;
+      const { startDate, endDate } = await shopee.shopRange(shop.shop_id, token, period);
+      const list = await shopee.fetchAllPages(
+        (pageNo) => shopee.getProductPerformance(shop.shop_id, token, { periodType: period, startDate, endDate, channel }, pageNo),
+        { pageSize: shopee.AMS_MAX_PAGE_SIZE, maxPages: 50 }
+      );
+      return list.map(p => ({
+        item_id: p.item_id,
+        item_name: p.item_name,
+        sales: num(p.sales),
+        items_sold: num(p.items_sold),
+        orders: num(p.orders),
+        clicks: num(p.clicks),
+        est_commission: num(p.est_commission),
+        roi: num(p.roi),
+        total_buyers: num(p.total_buyers),
+        new_buyers: num(p.new_buyers),
+      }));
     });
 
+    data.sort((a, b) => b.sales - a.sales);
     res.json({ data, errors, source: 'live', count: data.length });
   } catch (e) {
     res.json({ data: [], source: 'error', error: e.message });
@@ -1124,6 +809,29 @@ router.get('/products', async (req, res) => {
 });
 
 // ---------- Transactions (from Shopee API) ----------
+
+/** One conversion-report order flattened for the table. Amounts are in rupiah. */
+function normalizeConversion(o) {
+  const items = o.items || [];
+  const first = items[0]?.item_name || '-';
+  return {
+    order_sn: o.order_sn,
+    order_status: o.order_status,
+    verified_status: o.verified_status,
+    buyer_status: o.buyer_status,
+    place_order_time: o.place_order_time,
+    affiliate_id: o.affiliate_id,
+    affiliate_name: o.affiliate_name,
+    affiliate_username: o.affiliate_username,
+    channel: o.channel,
+    item_name: items.length > 1 ? `${first} (+${items.length - 1} produk)` : first,
+    qty: items.reduce((n, i) => n + num(i.qty), 0),
+    purchase_value: items.reduce((n, i) => n + num(i.purchase_value), 0),
+    refund_amount: items.reduce((n, i) => n + num(i.refund_amount), 0),
+    commission: num(o.order_brand_commission),
+  };
+}
+
 router.get('/transactions', async (req, res) => {
   try {
     if ((process.env.APP_MODE || 'mock') !== 'live') {
@@ -1134,8 +842,22 @@ router.get('/transactions', async (req, res) => {
     const shops = await resolveShops(req.query.shop_id);
     if (!shops.length) return res.json({ data: [], source: 'empty' });
 
-    const { data, errors } = await collectFromShops(shops, (shop) => fetchAllTransactions(shop, period, 10));
+    const { data, errors } = await collectFromShops(shops, async (shop) => {
+      const token = await shopee.ensureValidToken(shop);
+      const { startDate } = await shopee.shopRange(shop.shop_id, token, period);
+      // Orders placed from the period start (00:00 WIB) until now.
+      const iso = `${startDate.slice(0, 4)}-${startDate.slice(4, 6)}-${startDate.slice(6, 8)}`;
+      const placeOrderTimeStart = Math.floor(Date.parse(`${iso}T00:00:00+07:00`) / 1000);
+      const placeOrderTimeEnd = Math.floor(Date.now() / 1000);
+      // page_no * page_size must stay <= 10000.
+      const list = await shopee.fetchAllPages(
+        (pageNo) => shopee.getConversionReport(shop.shop_id, token, { placeOrderTimeStart, placeOrderTimeEnd }, pageNo),
+        { pageSize: shopee.CONVERSION_PAGE_SIZE, maxPages: 10000 / shopee.CONVERSION_PAGE_SIZE }
+      );
+      return list.map(normalizeConversion);
+    });
 
+    data.sort((a, b) => String(b.place_order_time).localeCompare(String(a.place_order_time), undefined, { numeric: true }));
     res.json({ data, errors, source: 'live', count: data.length });
   } catch (e) {
     res.json({ data: [], source: 'error', error: e.message });
@@ -1147,10 +869,23 @@ router.get('/dashboard/compare', async (req, res) => {
   try {
     const shopId = req.query.shop_id;
     
-    const results = {
-      Last7d: await latestSnapshotTotals('Last7d', { shopId }),
-      Last30d: await latestSnapshotTotals('Last30d', { shopId }),
-    };
+    let results;
+    if ((process.env.APP_MODE || 'mock') === 'live') {
+      // Both windows from the same daily rows, ending on Shopee's latest data date.
+      const { days, rows } = await daily.dailySeries(await resolveShops(shopId), 'Last30d');
+      const sumDays = (list) => list.reduce((t, d) => {
+        const r = rows[d] || {};
+        t.gmv += r.sales || 0; t.orders += r.orders || 0;
+        t.commission += r.commission || 0; t.clicks += r.clicks || 0;
+        return t;
+      }, { gmv: 0, orders: 0, commission: 0, clicks: 0 });
+      results = { Last7d: sumDays(days.slice(-7)), Last30d: sumDays(days) };
+    } else {
+      results = {
+        Last7d: await latestSnapshotTotals('Last7d', { shopId }),
+        Last30d: await latestSnapshotTotals('Last30d', { shopId }),
+      };
+    }
 
     // Calculate changes
     const r7 = results['Last7d'] || {};

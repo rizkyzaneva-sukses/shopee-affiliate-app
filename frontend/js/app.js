@@ -259,6 +259,7 @@ async function loadTrend(fresh = false) {
   const params = new URLSearchParams();
   if (fresh) params.set('fresh', '1');
   if (state.shop !== 'all') params.set('shop_id', state.shop);
+  if (state.channel !== 'all') params.set('channel', state.channel);
   params.set('period', state.period);
 
   const res = await apiGet('/api/dashboard/trend?' + params.toString());
@@ -302,7 +303,7 @@ function getTotals() {
   const sum = (k) => d.reduce((s, a) => s + (Number(a[k]) || 0), 0);
   return {
     gmv: sum('gmv'), orders: sum('orders'), commission: sum('commission'), clicks: sum('clicks'),
-    new_buyers: sum('new_buyers'), total_buyers: sum('total_buyers'),
+    items_sold: sum('items_sold'), new_buyers: sum('new_buyers'), total_buyers: sum('total_buyers'),
     affiliates: d.length, active: d.filter(a => a.status === 'active').length,
   };
 }
@@ -320,7 +321,7 @@ function updateKPI() {
   document.getElementById('kpiActive').textContent = t.active + ' / ' + t.affiliates;
 
   // Item Sold
-  const itemsSold = t.total_buyers;
+  const itemsSold = t.items_sold || 0;
   document.getElementById('kpiItemSold').textContent = formatNumber(itemsSold);
 
   // Avg Commission Rate
@@ -523,6 +524,12 @@ function renderShopList() {
   `).join('');
 }
 
+function formatDate(v) {
+  if (!v) return '';
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
 function renderCampaigns() {
   const el = document.getElementById('campaignList');
   if (!el) return;
@@ -532,27 +539,45 @@ function renderCampaigns() {
       <div class="sm:col-span-2 text-center py-10">
         <i class="fas fa-bullhorn text-3xl text-slate-700 mb-3"></i>
         <p class="text-slate-500 text-sm">Belum ada campaign</p>
+        <p class="text-xs text-slate-600 mt-1">Klik "Sync Campaigns" untuk menarik targeted campaign dari Shopee</p>
       </div>`;
     return;
   }
 
   el.innerHTML = state.campaigns.map(c => {
-    const st = c.status === 'Ongoing' ? 'status-active' : c.status === 'Upcoming' ? 'status-warning' : 'status-inactive';
+    const st = c.status === 'Ongoing' ? 'status-active'
+      : ['Upcoming', 'Paused', 'Draft'].includes(c.status) ? 'status-warning' : 'status-inactive';
+    const start = formatDate(c.period_start);
+    const end = c.period_end ? formatDate(c.period_end) : 'tanpa batas';
     return `
       <div class="campaign-card">
         <div class="flex items-start justify-between gap-3">
           <div>
             <p class="font-medium text-slate-100">${esc(c.name)}</p>
-            <p class="text-xs text-slate-500 mt-0.5">${esc(c.type)} · ${c.products_count || 0} produk · ${c.affiliates_count || 0} afiliator</p>
+            <p class="text-xs text-slate-500 mt-0.5">${esc(c.type)} · ${c.products_count || 0} produk · ${c.affiliates_count || 0} afiliator${state.shop === 'all' && c.shop_name ? ' · ' + esc(c.shop_name) : ''}</p>
           </div>
           <span class="status-badge ${st}">${esc(c.status)}</span>
         </div>
         <div class="flex items-center justify-between mt-3 text-xs text-slate-400">
           <span>Komisi: <span class="text-orange-400 font-medium">${esc(c.commission_info || '-')}</span></span>
-          <span>${esc(c.period_end || '')}</span>
+          <span>${esc(start ? start + ' – ' + end : end)}</span>
         </div>
       </div>`;
   }).join('');
+}
+
+async function syncCampaigns() {
+  const btn = document.getElementById('btnSyncCampaigns');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Syncing...'; }
+  const path = state.shop !== 'all' ? `/api/sync/campaigns/${state.shop}` : '/api/campaigns/sync-all';
+  const res = await apiPost(path);
+  if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sync-alt text-xs"></i> Sync Campaigns'; }
+
+  const failed = (res?.shops || []).filter(r => r.error);
+  if (res?.error) showToast(res.error, 'info');
+  else if (failed.length) showToast('Gagal: ' + failed.map(r => `${r.name || r.shop_id} (${r.error})`).join(', '), 'info');
+  else showToast(`Synced ${res?.total ?? res?.synced ?? 0} campaign`, 'success');
+  await loadCampaigns();
 }
 
 function renderChart() {
@@ -572,15 +597,15 @@ function renderChart() {
     let msg = '';
     if (t?.failed) {
       msg = 'Gagal memuat tren harian (server error atau timeout). Coba klik Refresh.';
-    } else if (t?.source === 'unavailable') {
-      const d = t.diag || {};
-      msg = `Data harian belum terbaca — ${t.transactions} transaksi, ${d.dated} bertanggal, ` +
-        `${d.in_range} dalam rentang ${(d.range || []).join(' s/d ')}, ${d.with_amount} bernilai. ` +
-        `Contoh tanggal: ${JSON.stringify(d.sample_date)}. Field: ${(d.sample_keys || []).join(', ')}`;
     } else if (t?.errors?.length) {
       msg = `Toko gagal dimuat — ${t.errors.map(e => `${e.name || e.shop_id}: ${e.error}`).join('; ')}`;
-    } else if (t?.source === 'transactions' && !t.transactions) {
-      msg = 'Belum ada transaksi di periode ini.';
+    } else if (t?.source === 'mock') {
+      msg = 'Tren harian hanya tersedia di mode live.';
+    } else if (t?.labels?.length && t.gmv.every(v => v === 0) && t.orders.every(v => v === 0)) {
+      msg = 'Belum ada penjualan affiliate di periode ini.';
+    }
+    if (!msg && t?.latest_date) {
+      msg = `Data Shopee terakhir: ${new Date(t.latest_date + 'T00:00:00Z').toLocaleDateString('id-ID', { day: 'numeric', month: 'long', timeZone: 'UTC' })}`;
     }
     note.textContent = msg;
     note.classList.toggle('hidden', !msg);
@@ -883,6 +908,8 @@ async function loadProducts() {
 
   const params = new URLSearchParams();
   if (state.shop !== 'all') params.set('shop_id', state.shop);
+  if (state.channel !== 'all') params.set('channel', state.channel);
+  params.set('period', state.period);
 
   const res = await apiGet('/api/products?' + params.toString());
 
@@ -898,17 +925,15 @@ function renderProductStats(products) {
   const el = document.getElementById('productStats');
   if (!el) return;
 
-  const totalProducts = products.length;
-  const totalGmv = products.reduce((s, p) => s + Number(p.sales_amount || p.gmv || 0), 0);
-  const totalOrders = products.reduce((s, p) => s + Number(p.order_count || p.orders || 0), 0);
-  const avgCommRate = products.length > 0
-    ? products.reduce((s, p) => s + Number(p.commission_rate || 0), 0) / products.length
-    : 0;
+  const sum = (k) => products.reduce((s, p) => s + (Number(p[k]) || 0), 0);
+  const totalGmv = sum('sales');
+  const totalComm = sum('est_commission');
+  const commRate = totalGmv > 0 ? totalComm / totalGmv * 100 : 0;
 
   el.innerHTML = `
     <div class="card p-4">
-      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total Produk</span><div class="kpi-icon" style="background:rgba(59,130,246,.15);color:#60a5fa"><i class="fas fa-box"></i></div></div>
-      <p class="text-xl font-bold text-slate-100">${totalProducts}</p>
+      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Produk Terjual</span><div class="kpi-icon" style="background:rgba(59,130,246,.15);color:#60a5fa"><i class="fas fa-box"></i></div></div>
+      <p class="text-xl font-bold text-slate-100">${formatNumber(products.length)} <span class="text-xs font-normal text-slate-500">produk · ${formatNumber(sum('items_sold'))} item</span></p>
     </div>
     <div class="card p-4">
       <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total GMV</span><div class="kpi-icon" style="background:rgba(16,185,129,.15);color:#34d399"><i class="fas fa-money-bill-wave"></i></div></div>
@@ -916,11 +941,11 @@ function renderProductStats(products) {
     </div>
     <div class="card p-4">
       <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total Order</span><div class="kpi-icon" style="background:var(--orange-dim);color:#fb923c"><i class="fas fa-shopping-bag"></i></div></div>
-      <p class="text-xl font-bold text-slate-100">${formatNumber(totalOrders)}</p>
+      <p class="text-xl font-bold text-slate-100">${formatNumber(sum('orders'))}</p>
     </div>
     <div class="card p-4">
-      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Avg Komisi Rate</span><div class="kpi-icon" style="background:rgba(168,85,247,.15);color:#c084fc"><i class="fas fa-percentage"></i></div></div>
-      <p class="text-xl font-bold text-slate-100">${avgCommRate.toFixed(1)}%</p>
+      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Rata-rata Komisi</span><div class="kpi-icon" style="background:rgba(168,85,247,.15);color:#c084fc"><i class="fas fa-percentage"></i></div></div>
+      <p class="text-xl font-bold text-slate-100">${commRate.toFixed(1)}%</p>
     </div>`;
 }
 
@@ -933,42 +958,29 @@ function renderProductTable(products) {
       <div class="flex flex-col items-center gap-3">
         <i class="fas fa-box text-3xl text-slate-700"></i>
         <p class="text-slate-400 text-sm">Belum ada data produk</p>
-        <p class="text-xs text-slate-600">Klik "Muat Produk" untuk mengambil dari Shopee AMS</p>
+        <p class="text-xs text-slate-600">Klik "Muat Produk" untuk mengambil performa produk dari Shopee AMS</p>
       </div>
     </td></tr>`;
     return;
   }
 
-  // Sort by GMV/sales descending
-  const sorted = products.sort((a, b) => Number(b.sales_amount || b.gmv || 0) - Number(a.sales_amount || a.gmv || 0));
-
-  tbody.innerHTML = sorted.map((p, i) => {
-    const gmv = Number(p.sales_amount || p.gmv || 0);
-    const orders = Number(p.order_count || p.orders || 0);
-    const commRate = Number(p.commission_rate || 0);
-    const price = Number(p.price || p.min_price || 0);
-    const estComm = gmv * (commRate / 100);
-    const productName = p.product_name || p.name || p.item_name || '-';
-    const category = p.category_name || p.category || '-';
-    const img = p.image || p.img || p.image_url || '';
+  tbody.innerHTML = products.map((p, i) => {
+    const gmv = Number(p.sales) || 0;
+    const comm = Number(p.est_commission) || 0;
+    const commRate = gmv > 0 ? comm / gmv * 100 : 0;
 
     return `<tr class="table-row">
       <td class="td-rank">${i + 1}</td>
       <td>
-        <div class="flex items-center gap-3">
-          ${safeUrl(img) ? '<img src="' + safeUrl(img) + '" class="w-10 h-10 rounded object-cover bg-slate-800" onerror="this.style.display=\'none\'" />' : '<div class="w-10 h-10 rounded bg-slate-800 flex items-center justify-center text-slate-600 text-xs"><i class="fas fa-box"></i></div>'}
-          <div class="min-w-0">
-            <p class="font-medium text-slate-100 truncate max-w-[200px]">${esc(productName)}</p>
-            <p class="text-xs text-slate-500">ID: ${esc(p.item_id || p.product_id || '-')}${p.shop_name ? ' · ' + esc(p.shop_name) : ''}</p>
-          </div>
-        </div>
+        <p class="font-medium text-slate-100 truncate max-w-[260px]">${esc(p.item_name || '-')}</p>
+        <p class="text-xs text-slate-500">ID: ${esc(p.item_id || '-')}${p.shop_name ? ' · ' + esc(p.shop_name) : ''}</p>
       </td>
-      <td class="text-xs text-slate-400">${esc(category)}</td>
-      <td class="text-right text-slate-300">${formatRupiah(price)}</td>
+      <td class="text-right text-slate-300">${formatNumber(p.items_sold)}</td>
+      <td class="text-right text-slate-300">${formatNumber(p.clicks)}</td>
       <td class="text-right"><span class="text-emerald-400 font-medium">${commRate.toFixed(1)}%</span></td>
-      <td class="text-right font-medium text-orange-400">${formatRupiah(estComm)}</td>
+      <td class="text-right font-medium text-orange-400">${formatRupiah(comm)}</td>
       <td class="text-right font-medium text-slate-100">${formatRupiah(gmv)}</td>
-      <td class="text-right text-slate-300">${formatNumber(orders)}</td>
+      <td class="text-right text-slate-300">${formatNumber(p.orders)}</td>
     </tr>`;
   }).join('');
 }
@@ -989,22 +1001,30 @@ async function loadTransactions() {
   renderTxTable(allTransactions);
 }
 
+// order_status values from get_conversion_report
+const TX_STATUS = {
+  Unpaid: { cls: 'status-warning', text: 'Belum Bayar' },
+  Pending: { cls: 'status-warning', text: 'Pending' },
+  Completed: { cls: 'status-active', text: 'Selesai' },
+  Cancelled: { cls: 'status-inactive', text: 'Batal' },
+};
+
 function renderTxStats(txs) {
   const el = document.getElementById('txStats');
   if (!el) return;
 
   const totalTxs = txs.length;
-  const totalGmv = txs.reduce((s, t) => s + Number(t.payment_amount || t.gmv || t.amount || 0), 0);
-  const totalComm = txs.reduce((s, t) => s + Number(t.estimated_commission || t.commission || 0), 0);
-  const completed = txs.filter(t => String(t.status).toLowerCase().includes('confirm') || t.order_status === 3).length;
+  const totalGmv = txs.reduce((s, t) => s + (Number(t.purchase_value) || 0), 0);
+  const totalComm = txs.reduce((s, t) => s + (Number(t.commission) || 0), 0);
+  const completed = txs.filter(t => t.order_status === 'Completed').length;
 
   el.innerHTML = `
     <div class="card p-4">
       <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total Transaksi</span><div class="kpi-icon" style="background:rgba(59,130,246,.15);color:#60a5fa"><i class="fas fa-receipt"></i></div></div>
-      <p class="text-xl font-bold text-slate-100">${totalTxs}</p>
+      <p class="text-xl font-bold text-slate-100">${formatNumber(totalTxs)}</p>
     </div>
     <div class="card p-4">
-      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total GMV</span><div class="kpi-icon" style="background:rgba(16,185,129,.15);color:#34d399"><i class="fas fa-money-bill-wave"></i></div></div>
+      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Total Nilai Order</span><div class="kpi-icon" style="background:rgba(16,185,129,.15);color:#34d399"><i class="fas fa-money-bill-wave"></i></div></div>
       <p class="text-xl font-bold text-slate-100">${formatRupiah(totalGmv)}</p>
     </div>
     <div class="card p-4">
@@ -1012,8 +1032,8 @@ function renderTxStats(txs) {
       <p class="text-xl font-bold text-slate-100">${formatRupiah(totalComm)}</p>
     </div>
     <div class="card p-4">
-      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Terkonfirmasi</span><div class="kpi-icon" style="background:rgba(34,197,94,.15);color:#4ade80"><i class="fas fa-check-circle"></i></div></div>
-      <p class="text-xl font-bold text-slate-100">${completed} / ${totalTxs}</p>
+      <div class="flex items-center justify-between mb-2"><span class="text-xs text-slate-500">Selesai</span><div class="kpi-icon" style="background:rgba(34,197,94,.15);color:#4ade80"><i class="fas fa-check-circle"></i></div></div>
+      <p class="text-xl font-bold text-slate-100">${formatNumber(completed)} / ${formatNumber(totalTxs)}</p>
     </div>`;
 }
 
@@ -1032,27 +1052,16 @@ function renderTxTable(txs) {
     return;
   }
 
-  const statusMap = {
-    1: { cls: 'status-warning', text: 'Pending' },
-    2: { cls: 'status-warning', text: 'Shipping' },
-    3: { cls: 'status-active', text: 'Selesai' },
-    4: { cls: 'status-inactive', text: 'Cancelled' },
-    5: { cls: 'status-inactive', text: 'Return' },
-  };
-
   tbody.innerHTML = txs.map(t => {
-    const status = statusMap[t.order_status] || { cls: 'status-inactive', text: t.status || 'Unknown' };
-    const amount = Number(t.payment_amount || t.gmv || t.amount || 0);
-    const comm = Number(t.estimated_commission || t.commission || 0);
-
+    const status = TX_STATUS[t.order_status] || { cls: 'status-inactive', text: t.order_status || '-' };
     return `<tr class="table-row">
-      <td class="font-mono text-xs text-slate-300">${esc(t.order_id || t.sn || '-')}</td>
-      <td class="text-slate-300">${esc(t.affiliate_name || t.username || '-')}</td>
-      <td class="text-slate-300 truncate max-w-[180px]">${esc(t.item_name || t.product_name || '-')}${t.shop_name ? '<p class="text-[10px] text-slate-500">' + esc(t.shop_name) + '</p>' : ''}</td>
-      <td class="text-right text-slate-100">${formatRupiah(amount)}</td>
-      <td class="text-right font-medium text-orange-400">${formatRupiah(comm)}</td>
+      <td class="font-mono text-xs text-slate-300">${esc(t.order_sn || '-')}</td>
+      <td class="text-slate-300">${esc(t.affiliate_name || t.affiliate_username || '-')}<p class="text-[10px] text-slate-500">${esc(t.channel || '')}</p></td>
+      <td class="text-slate-300 truncate max-w-[220px]">${esc(t.item_name || '-')}${t.shop_name ? '<p class="text-[10px] text-slate-500">' + esc(t.shop_name) + '</p>' : ''}</td>
+      <td class="text-right text-slate-100">${formatRupiah(t.purchase_value)}</td>
+      <td class="text-right font-medium text-orange-400">${formatRupiah(t.commission)}</td>
       <td class="text-center"><span class="status-badge ${status.cls}">${esc(status.text)}</span></td>
-      <td class="text-xs text-slate-500">${esc(t.order_time || t.create_time || '-')}</td>
+      <td class="text-xs text-slate-500">${esc(t.place_order_time || '-')}</td>
     </tr>`;
   }).join('');
 }
@@ -1062,11 +1071,18 @@ function exportTxCSV() {
     showToast('Muat transaksi dulu', 'info');
     return;
   }
-  const header = 'Order ID,Afiliator,Produk,Harga,Komisi,Status,Tanggal';
-  const rows = allTransactions.map(t =>
-    `"${t.order_id || t.sn || ''}","${t.affiliate_name || t.username || ''}","${(t.item_name || t.product_name || '').replace(/"/g, '""')}",${Number(t.payment_amount || t.gmv || t.amount || 0)},${Number(t.estimated_commission || t.commission || 0)},"${t.status || ''}","${t.order_time || t.create_time || ''}"`
-  );
-  const csv = [header, ...rows].join('\n');
+  const cell = (v) => {
+    let str = String(v ?? '');
+    if (/^[=+\-@]/.test(str)) str = "'" + str;
+    return `"${str.replace(/"/g, '""')}"`;
+  };
+  const header = 'Order SN,Toko,Afiliator,Channel,Produk,Qty,Nilai Order,Komisi,Refund,Status,Verifikasi,Tanggal Order';
+  const rows = allTransactions.map(t => [
+    cell(t.order_sn), cell(t.shop_name), cell(t.affiliate_name), cell(t.channel), cell(t.item_name),
+    Number(t.qty) || 0, Number(t.purchase_value) || 0, Number(t.commission) || 0, Number(t.refund_amount) || 0,
+    cell(t.order_status), cell(t.verified_status), cell(t.place_order_time),
+  ].join(','));
+  const csv = '\uFEFF' + [header, ...rows].join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
