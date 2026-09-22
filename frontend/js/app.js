@@ -13,6 +13,8 @@ let state = {
   tab: 'dashboard',
   shops: [],
   affiliates: [],
+  totals: null,       // KPI totals over the full list (table may be truncated)
+  affiliateCount: 0,
   campaigns: [],
   goals: [],
   trend: null,
@@ -31,6 +33,21 @@ function formatRupiah(num) {
   return 'Rp ' + num.toLocaleString('id-ID');
 }
 function formatNumber(n) { return Number(n || 0).toLocaleString('id-ID'); }
+
+/** Escape text before it goes into innerHTML — names/messages come from Shopee and third parties. */
+function esc(v) {
+  return String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/** Only allow http(s) image URLs into src attributes. */
+function safeUrl(u) {
+  return /^https?:\/\//i.test(String(u || '')) ? esc(u) : '';
+}
+
+function formatRoi(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n.toFixed(1) + 'x' : '-';
+}
 
 function getChannelBadge(ch) {
   if (ch === 'Live Streaming') return 'badge-live';
@@ -229,6 +246,8 @@ async function loadAffiliates() {
 
   state.source = data.length ? (res?.source || 'live') : 'empty';
   state.affiliates = data.sort((a, b) => (b.gmv || 0) - (a.gmv || 0));
+  state.totals = res?.totals || null;
+  state.affiliateCount = res?.total_count ?? data.length;
   updateKPI();
   updateQuickStats();
   renderTop();
@@ -276,24 +295,32 @@ function updateModeBadge() {
   }
 }
 
-function updateKPI() {
+/** Totals from the server (full list); summed locally only as a fallback. */
+function getTotals() {
+  if (state.totals) return state.totals;
   const d = state.affiliates;
-  const gmv = d.reduce((s, a) => s + Number(a.gmv || 0), 0);
-  const orders = d.reduce((s, a) => s + Number(a.orders || 0), 0);
-  const commission = d.reduce((s, a) => s + Number(a.commission || 0), 0);
-  const clicks = d.reduce((s, a) => s + Number(a.clicks || 0), 0);
+  const sum = (k) => d.reduce((s, a) => s + (Number(a[k]) || 0), 0);
+  return {
+    gmv: sum('gmv'), orders: sum('orders'), commission: sum('commission'), clicks: sum('clicks'),
+    new_buyers: sum('new_buyers'), total_buyers: sum('total_buyers'),
+    affiliates: d.length, active: d.filter(a => a.status === 'active').length,
+  };
+}
+
+function updateKPI() {
+  const t = getTotals();
+  const { gmv, orders, commission, clicks } = t;
   const roi = commission > 0 ? gmv / commission : 0;
-  const active = d.filter(a => a.status === 'active').length;
 
   document.getElementById('kpiGmv').textContent = formatRupiah(gmv);
   document.getElementById('kpiOrder').textContent = formatNumber(orders);
   document.getElementById('kpiCommission').textContent = formatRupiah(commission);
   document.getElementById('kpiRoi').textContent = roi.toFixed(1) + 'x';
   document.getElementById('kpiClicks').textContent = formatNumber(clicks);
-  document.getElementById('kpiActive').textContent = active + ' / ' + d.length;
+  document.getElementById('kpiActive').textContent = t.active + ' / ' + t.affiliates;
 
   // Item Sold
-  const itemsSold = d.reduce((s, a) => s + Number(a.items_sold || a.total_buyers || 0), 0);
+  const itemsSold = t.total_buyers;
   document.getElementById('kpiItemSold').textContent = formatNumber(itemsSold);
 
   // Avg Commission Rate
@@ -302,12 +329,7 @@ function updateKPI() {
 }
 
 function updateQuickStats() {
-  const d = state.affiliates;
-  const gmv = d.reduce((s, a) => s + Number(a.gmv || 0), 0);
-  const orders = d.reduce((s, a) => s + Number(a.orders || 0), 0);
-  const commission = d.reduce((s, a) => s + Number(a.commission || 0), 0);
-  const clicks = d.reduce((s, a) => s + Number(a.clicks || 0), 0);
-  const newBuyers = d.reduce((s, a) => s + Number(a.new_buyers || 0), 0);
+  const { gmv, orders, commission, clicks, new_buyers: newBuyers } = getTotals();
 
   // AOV
   const aov = orders > 0 ? gmv / orders : 0;
@@ -354,14 +376,14 @@ function renderTop() {
       <div class="top-item ${rank}">
         <div class="rank-num">${medal || (i + 1)}</div>
         <div class="flex-1 min-w-0">
-          <p class="font-medium text-sm text-slate-100 truncate">${a.name || a.username}</p>
+          <p class="font-medium text-sm text-slate-100 truncate">${esc(a.name || a.username)}</p>
           <div class="flex items-center gap-2 mt-1">
             <div class="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
               <div class="h-full bg-gradient-to-r from-orange-500 to-amber-400 rounded-full" style="width:${pct}%"></div>
             </div>
             <span class="text-[10px] text-slate-500">${commRate}%</span>
           </div>
-          <p class="text-[10px] text-slate-500 mt-0.5">${a.orders || 0} order · @${a.username || '-'}</p>
+          <p class="text-[10px] text-slate-500 mt-0.5">${a.orders || 0} order · @${esc(a.username || '-')}${state.shop === 'all' && a.shop_name ? ' · ' + esc(a.shop_name) : ''}</p>
         </div>
         <div class="text-right flex-shrink-0">
           <p class="font-semibold text-sm text-orange-400">${formatRupiah(a.gmv)}</p>
@@ -376,8 +398,11 @@ function renderTable() {
   const tbodyFull = document.getElementById('affiliateTableFull');
   const countEl = document.getElementById('affiliateCount');
   const countFull = document.getElementById('affiliateCountFull');
-  if (countEl) countEl.textContent = state.affiliates.length + ' afiliator';
-  if (countFull) countFull.textContent = state.affiliates.length + ' afiliator';
+  const countText = state.affiliateCount > state.affiliates.length
+    ? `${state.affiliates.length} dari ${state.affiliateCount} afiliator`
+    : `${state.affiliateCount} afiliator`;
+  if (countEl) countEl.textContent = countText;
+  if (countFull) countFull.textContent = countText;
 
   function emptyRow() {
     const hasShops = state.shops.length > 0;
@@ -410,22 +435,22 @@ function renderTable() {
           <td class="td-rank">${i + 1}</td>
           <td>
             <div class="flex items-center gap-3">
-              <div class="avatar">${initials}</div>
+              <div class="avatar">${esc(initials)}</div>
               <div>
-                <p class="font-medium text-slate-100">${a.name || '-'}</p>
-                <p class="text-xs text-slate-500">@${a.username || '-'} · ${a.followers || ''}</p>
+                <p class="font-medium text-slate-100">${esc(a.name || '-')}</p>
+                <p class="text-xs text-slate-500">@${esc(a.username || '-')}${state.shop === 'all' && a.shop_name ? ' · ' + esc(a.shop_name) : ''}${a.followers ? ' · ' + esc(a.followers) : ''}</p>
               </div>
             </div>
           </td>
-          <td><span class="badge ${getChannelBadge(a.channel)}">${a.channel || '-'}</span></td>
+          <td><span class="badge ${getChannelBadge(a.channel)}">${esc(a.channel || '-')}</span></td>
           <td class="text-right font-medium text-slate-100">${formatRupiah(a.gmv)}</td>
           <td class="text-right text-slate-300">${formatNumber(a.orders)}</td>
           <td class="text-right text-slate-300">${formatNumber(a.clicks)}</td>
           <td class="text-right font-medium text-orange-400">${formatRupiah(a.commission)}</td>
-          <td class="text-right"><span class="text-xs text-emerald-400">${commRate}%</span> <span class="font-semibold text-slate-100">${Number(a.roi || 0).toFixed(1)}x</span></td>
+          <td class="text-right"><span class="text-xs text-emerald-400">${commRate}%</span> <span class="font-semibold text-slate-100">${formatRoi(a.roi)}</span></td>
           <td class="text-center">
             <span class="status-badge ${st.cls}">${st.text}</span>
-            <p class="text-[10px] text-slate-500 mt-0.5">${a.last_active_at || a.last_active || ''}</p>
+            <p class="text-[10px] text-slate-500 mt-0.5">${esc(a.last_active_at || a.last_active || '')}</p>
           </td>
         </tr>`;
     }).join('');
@@ -444,7 +469,7 @@ function renderShopSelect() {
   const current = sel.value;
   sel.innerHTML = `<option value="all">Semua Toko (${state.shops.length})</option>`;
   state.shops.forEach(s => {
-    sel.innerHTML += `<option value="${s.shop_id}">${s.shop_name || s.shop_id}</option>`;
+    sel.innerHTML += `<option value="${esc(s.shop_id)}">${esc(s.shop_name || s.shop_id)}</option>`;
   });
   sel.value = current || 'all';
 }
@@ -478,13 +503,13 @@ function renderShopList() {
     <div class="shop-item ${s.status === 'inactive' ? 'opacity-60' : ''}">
       <div class="flex items-center gap-3">
         <div class="w-9 h-9 rounded-lg bg-orange-500/20 text-orange-400 flex items-center justify-content-center text-sm font-bold">
-          ${(s.shop_name || 'S').charAt(0)}
+          ${esc((s.shop_name || 'S').charAt(0))}
         </div>
         <div>
-          <p class="font-medium text-sm text-slate-100">${s.shop_name || s.shop_id}</p>
-          <p class="text-xs text-slate-500">${s.region || '-'} · ${s.status === 'expired'
+          <p class="font-medium text-sm text-slate-100">${esc(s.shop_name || s.shop_id)}</p>
+          <p class="text-xs text-slate-500">${esc(s.region || '-')} · ${s.status === 'expired'
             ? '<span class="text-red-400 font-medium">token expired</span>'
-            : (s.status || 'active')} · ${lastSync(s)}</p>
+            : esc(s.status || 'active')} · ${lastSync(s)}</p>
         </div>
       </div>
       ${s.status === 'expired' ? `
@@ -517,14 +542,14 @@ function renderCampaigns() {
       <div class="campaign-card">
         <div class="flex items-start justify-between gap-3">
           <div>
-            <p class="font-medium text-slate-100">${c.name}</p>
-            <p class="text-xs text-slate-500 mt-0.5">${c.type} · ${c.products_count || 0} produk · ${c.affiliates_count || 0} afiliator</p>
+            <p class="font-medium text-slate-100">${esc(c.name)}</p>
+            <p class="text-xs text-slate-500 mt-0.5">${esc(c.type)} · ${c.products_count || 0} produk · ${c.affiliates_count || 0} afiliator</p>
           </div>
-          <span class="status-badge ${st}">${c.status}</span>
+          <span class="status-badge ${st}">${esc(c.status)}</span>
         </div>
         <div class="flex items-center justify-between mt-3 text-xs text-slate-400">
-          <span>Komisi: <span class="text-orange-400 font-medium">${c.commission_info || '-'}</span></span>
-          <span>${c.period_end || ''}</span>
+          <span>Komisi: <span class="text-orange-400 font-medium">${esc(c.commission_info || '-')}</span></span>
+          <span>${esc(c.period_end || '')}</span>
         </div>
       </div>`;
   }).join('');
@@ -634,11 +659,8 @@ function renderGoals() {
     return;
   }
 
-  // Calculate current progress from affiliates data
-  const d = state.affiliates;
-  const currentGmv = d.reduce((s, a) => s + Number(a.gmv || 0), 0);
-  const currentOrders = d.reduce((s, a) => s + Number(a.orders || 0), 0);
-  const currentCommission = d.reduce((s, a) => s + Number(a.commission || 0), 0);
+  // Calculate current progress from the full affiliate totals
+  const { gmv: currentGmv, orders: currentOrders, commission: currentCommission } = getTotals();
 
   el.innerHTML = state.goals.map(g => {
     const gmvPct = Math.min(100, (currentGmv / g.target_gmv) * 100);
@@ -650,9 +672,9 @@ function renderGoals() {
     return `
       <div class="bg-slate-900/50 rounded-lg p-3">
         <div class="flex items-center justify-between mb-2">
-          <p class="font-medium text-sm text-slate-100">${g.name}</p>
+          <p class="font-medium text-sm text-slate-100">${esc(g.name)}</p>
           <div class="flex items-center gap-1">
-            <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">${g.period || 'Month'}</span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">${esc(g.period || 'Month')}</span>
             <button class="text-slate-600 hover:text-red-400 text-xs" onclick="deleteGoal(${g.id})"><i class="fas fa-trash"></i></button>
           </div>
         </div>
@@ -767,8 +789,8 @@ async function checkAlerts() {
       <div class="flex items-start gap-3 p-3 rounded-lg border ${colors[a.type] || colors.info} mb-2">
         <i class="fas ${icons[a.type] || icons.info} mt-0.5"></i>
         <div class="flex-1">
-          <p class="font-medium text-sm">${a.title}</p>
-          <p class="text-xs opacity-80">${a.message}</p>
+          <p class="font-medium text-sm">${esc(a.title)}</p>
+          <p class="text-xs opacity-80">${esc(a.message)}</p>
         </div>
         <button class="text-xs opacity-50 hover:opacity-100" onclick="this.parentElement.remove()">
           <i class="fas fa-times"></i>
@@ -790,18 +812,27 @@ function exportCSV() {
   if (state.shop !== 'all') params.set('shop_id', state.shop);
   if (state.channel !== 'all') params.set('channel', state.channel);
   params.set('period', state.period);
-  window.open(`${API}/api/export/csv?${params.toString()}`, '_blank');
-  showToast('Export dimulai...', 'success');
+  // fetch rather than window.open: a plain navigation can't carry the admin token.
+  fetch(`${API}/api/export/csv?${params.toString()}`, { headers: authHeaders() })
+    .then(async (res) => {
+      if (res.status === 401) { clearAdminToken(); requireLogin(); return; }
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `affiliate-report-${state.period}-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('Export selesai', 'success');
+    })
+    .catch(e => showToast('Export gagal: ' + e.message, 'info'));
 }
 
 // ---------- Calculator ----------
 function showCalculator() {
   document.getElementById('calculatorModal').classList.remove('hidden');
   // Pre-fill with current data
-  const d = state.affiliates;
-  const currentGmv = d.reduce((s, a) => s + Number(a.gmv || 0), 0);
-  const currentComm = d.reduce((s, a) => s + Number(a.commission || 0), 0);
-  document.getElementById('calcCurrentGmv').value = Math.round(currentGmv);
+  document.getElementById('calcCurrentGmv').value = Math.round(getTotals().gmv);
 }
 
 function closeCalculator() {
@@ -837,6 +868,14 @@ async function runCalculator() {
   document.getElementById('calcCommTarget').textContent = formatRupiah(res.target.commission);
 }
 
+/** Per-shop failures from multi-shop endpoints, or a whole-request error. */
+function notifyShopErrors(res) {
+  if (res?.error) showToast('Shopee API: ' + res.error, 'info');
+  else if (res?.errors?.length) {
+    showToast('Gagal memuat: ' + res.errors.map(e => `${e.name || e.shop_id} (${e.error})`).join(', '), 'info');
+  }
+}
+
 // ---------- Products ----------
 async function loadProducts() {
   const btn = document.getElementById('btnSyncProducts');
@@ -850,6 +889,7 @@ async function loadProducts() {
   if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sync-alt text-xs"></i> Muat Produk'; }
 
   const data = res?.data || [];
+  notifyShopErrors(res);
   renderProductStats(data);
   renderProductTable(data);
 }
@@ -916,14 +956,14 @@ function renderProductTable(products) {
       <td class="td-rank">${i + 1}</td>
       <td>
         <div class="flex items-center gap-3">
-          ${img ? '<img src="' + img + '" class="w-10 h-10 rounded object-cover bg-slate-800" onerror="this.style.display=\'none\'" />' : '<div class="w-10 h-10 rounded bg-slate-800 flex items-center justify-center text-slate-600 text-xs"><i class="fas fa-box"></i></div>'}
+          ${safeUrl(img) ? '<img src="' + safeUrl(img) + '" class="w-10 h-10 rounded object-cover bg-slate-800" onerror="this.style.display=\'none\'" />' : '<div class="w-10 h-10 rounded bg-slate-800 flex items-center justify-center text-slate-600 text-xs"><i class="fas fa-box"></i></div>'}
           <div class="min-w-0">
-            <p class="font-medium text-slate-100 truncate max-w-[200px]">${productName}</p>
-            <p class="text-xs text-slate-500">ID: ${p.item_id || p.product_id || '-'}</p>
+            <p class="font-medium text-slate-100 truncate max-w-[200px]">${esc(productName)}</p>
+            <p class="text-xs text-slate-500">ID: ${esc(p.item_id || p.product_id || '-')}${p.shop_name ? ' · ' + esc(p.shop_name) : ''}</p>
           </div>
         </div>
       </td>
-      <td class="text-xs text-slate-400">${category}</td>
+      <td class="text-xs text-slate-400">${esc(category)}</td>
       <td class="text-right text-slate-300">${formatRupiah(price)}</td>
       <td class="text-right"><span class="text-emerald-400 font-medium">${commRate.toFixed(1)}%</span></td>
       <td class="text-right font-medium text-orange-400">${formatRupiah(estComm)}</td>
@@ -943,6 +983,7 @@ async function loadTransactions() {
 
   const res = await apiGet('/api/transactions?' + params.toString());
   allTransactions = res?.data || [];
+  notifyShopErrors(res);
 
   renderTxStats(allTransactions);
   renderTxTable(allTransactions);
@@ -1005,13 +1046,13 @@ function renderTxTable(txs) {
     const comm = Number(t.estimated_commission || t.commission || 0);
 
     return `<tr class="table-row">
-      <td class="font-mono text-xs text-slate-300">${t.order_id || t.sn || '-'}</td>
-      <td class="text-slate-300">${t.affiliate_name || t.username || '-'}</td>
-      <td class="text-slate-300 truncate max-w-[180px]">${t.item_name || t.product_name || '-'}</td>
+      <td class="font-mono text-xs text-slate-300">${esc(t.order_id || t.sn || '-')}</td>
+      <td class="text-slate-300">${esc(t.affiliate_name || t.username || '-')}</td>
+      <td class="text-slate-300 truncate max-w-[180px]">${esc(t.item_name || t.product_name || '-')}${t.shop_name ? '<p class="text-[10px] text-slate-500">' + esc(t.shop_name) + '</p>' : ''}</td>
       <td class="text-right text-slate-100">${formatRupiah(amount)}</td>
       <td class="text-right font-medium text-orange-400">${formatRupiah(comm)}</td>
-      <td class="text-center"><span class="status-badge ${status.cls}">${status.text}</span></td>
-      <td class="text-xs text-slate-500">${t.order_time || t.create_time || '-'}</td>
+      <td class="text-center"><span class="status-badge ${status.cls}">${esc(status.text)}</span></td>
+      <td class="text-xs text-slate-500">${esc(t.order_time || t.create_time || '-')}</td>
     </tr>`;
   }).join('');
 }
@@ -1180,7 +1221,7 @@ function showToast(msg, type = 'info') {
   document.querySelector('.toast')?.remove();
   const t = document.createElement('div');
   t.className = `toast toast-${type}`;
-  t.innerHTML = `<i class="fas ${type === 'success' ? 'fa-check-circle' : 'fa-info-circle'}"></i><span>${msg}</span>`;
+  t.innerHTML = `<i class="fas ${type === 'success' ? 'fa-check-circle' : 'fa-info-circle'}"></i><span>${esc(msg)}</span>`;
   document.body.appendChild(t);
   setTimeout(() => t.classList.add('show'), 10);
   setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 2800);
@@ -1211,20 +1252,21 @@ document.addEventListener('DOMContentLoaded', () => {
     state.period = e.target.value;
     // Auto-sync all shops for the new period, then reload
     showToast('Sync data untuk periode ' + e.target.options[e.target.selectedIndex].text + '...', 'info');
-    const syncRes = await apiPost('/api/sync/all', { period: state.period });
+    const syncRes = await apiPost('/api/sync/all', { period: state.period, channel: state.channel });
     if (syncRes?.total > 0) {
       showToast(`Synced ${syncRes.total} afiliator`, 'success');
     }
     await Promise.all([loadAffiliates(), loadTrend(), loadGoals()]);
   });
-  document.getElementById('searchInput')?.addEventListener('input', e => {
+  // Debounced: in live mode every search hits the Shopee API.
+  let searchTimer;
+  const onSearch = e => {
     state.search = e.target.value;
-    loadAffiliates();
-  });
-  document.getElementById('searchInputFull')?.addEventListener('input', e => {
-    state.search = e.target.value;
-    loadAffiliates();
-  });
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(loadAffiliates, 350);
+  };
+  document.getElementById('searchInput')?.addEventListener('input', onSearch);
+  document.getElementById('searchInputFull')?.addEventListener('input', onSearch);
   document.querySelectorAll('[data-tab]').forEach(el => {
     el.addEventListener('click', ev => { ev.preventDefault(); switchTab(el.dataset.tab); });
   });

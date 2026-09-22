@@ -26,6 +26,74 @@ function periodRange(periodType) {
   return { startDate: fmt(start), endDate: fmt(end) };
 }
 
+/** Finite number or 0 — Shopee sometimes sends "NaN" (e.g. ROI with zero commission). */
+function num(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * SQL for the rows of each shop's most recent sync of one period + channel.
+ * affiliate_performance keeps every past date range (each resync adds one),
+ * so summing the raw table double counts, and taking the newest row per
+ * affiliate would keep stale numbers for affiliates absent from the last sync.
+ * Every sync writes one date range per shop, so match on that range.
+ * Params: $1 period_type, $2 channel.
+ */
+const LATEST_SNAPSHOT_SQL = `
+  SELECT ap.*
+  FROM affiliate_performance ap
+  JOIN (
+    SELECT DISTINCT ON (shop_id) shop_id, start_date, end_date
+    FROM affiliate_performance
+    WHERE period_type = $1 AND channel = $2
+    ORDER BY shop_id, synced_at DESC
+  ) lr ON lr.shop_id = ap.shop_id AND lr.start_date = ap.start_date AND lr.end_date = ap.end_date
+  WHERE ap.period_type = $1 AND ap.channel = $2
+`;
+
+async function latestSnapshotTotals(period, { shopId, channel = 'AllChannel' } = {}) {
+  const params = [period, channel];
+  let filter = '';
+  if (shopId && shopId !== 'all') {
+    params.push(shopId);
+    filter = `WHERE shop_id = $${params.length}`;
+  }
+  const { rows } = await query(`
+    SELECT
+      COALESCE(SUM(gmv), 0) AS gmv,
+      COALESCE(SUM(orders), 0) AS orders,
+      COALESCE(SUM(est_commission), 0) AS commission,
+      COALESCE(SUM(clicks), 0) AS clicks,
+      COUNT(*) AS affiliates
+    FROM (${LATEST_SNAPSHOT_SQL}) latest
+    ${filter}
+  `, params);
+  const r = rows[0] || {};
+  return {
+    gmv: num(r.gmv),
+    orders: num(r.orders),
+    commission: num(r.commission),
+    clicks: num(r.clicks),
+    affiliates: num(r.affiliates),
+  };
+}
+
+/** KPI totals over a full affiliate list (the table itself may be truncated). */
+function summarizeAffiliates(list) {
+  const t = { gmv: 0, orders: 0, commission: 0, clicks: 0, new_buyers: 0, total_buyers: 0, affiliates: list.length, active: 0 };
+  for (const a of list) {
+    t.gmv += num(a.gmv);
+    t.orders += num(a.orders);
+    t.commission += num(a.commission);
+    t.clicks += num(a.clicks);
+    t.new_buyers += num(a.new_buyers);
+    t.total_buyers += num(a.total_buyers);
+    if ((a.status || 'active') === 'active') t.active++;
+  }
+  return t;
+}
+
 // ---------- Health ----------
 router.get('/health', async (_req, res) => {
   try {
@@ -275,9 +343,9 @@ router.post('/sync/all', async (req, res) => {
                total_buyers = EXCLUDED.total_buyers, new_buyers = EXCLUDED.new_buyers,
                synced_at = NOW()`,
             [a.affiliate_id, shop.shop_id, periodType, startDate, endDate, channel,
-             Number(a.sales || 0), a.orders || 0, a.clicks || 0,
-             Number(a.est_commission || 0), Number(a.roi || 0),
-             a.total_buyers || 0, a.new_buyers || 0]
+             num(a.sales), num(a.orders), num(a.clicks),
+             num(a.est_commission), num(a.roi),
+             num(a.total_buyers), num(a.new_buyers)]
           );
           count++;
         }
@@ -333,18 +401,36 @@ router.post('/shops', async (req, res) => {
 });
 
 // ---------- Affiliates + Performance ----------
+
+// Rows rendered in the tables; KPI totals always cover the full list.
+const AFFILIATE_TABLE_LIMIT = 500;
+
 router.get('/affiliates', async (req, res) => {
   try {
     const shopId = req.query.shop_id;
-    const channel = req.query.channel;
+    const channel = shopee.normalizeChannel(req.query.channel && req.query.channel !== 'all' ? req.query.channel : null);
     const period = req.query.period || 'Last30d';
-    const search = req.query.q || '';
+    const search = String(req.query.q || '').trim().toLowerCase();
 
-    // Try live performance first if mode=live and shop has token
+    const respond = (list, source, extra = {}) => {
+      const filtered = search
+        ? list.filter(a => `${a.name || ''} ${a.username || ''}`.toLowerCase().includes(search))
+        : list;
+      filtered.sort((x, y) => y.gmv - x.gmv);
+      res.json({
+        data: filtered.slice(0, AFFILIATE_TABLE_LIMIT),
+        totals: summarizeAffiliates(filtered),
+        total_count: filtered.length,
+        source,
+        ...extra,
+      });
+    };
+
+    // Try live performance first if mode=live and a single shop is selected
     const mode = process.env.APP_MODE || 'mock';
     let liveError = null;
 
-    if (mode === 'live' && shopId) {
+    if (mode === 'live' && shopId && shopId !== 'all') {
       const { rows: shops } = await query(`SELECT * FROM shops WHERE shop_id = $1`, [shopId]);
       if (shops.length && shops[0].access_token) {
         try {
@@ -360,20 +446,22 @@ router.get('/affiliates', async (req, res) => {
 
           const list = rows.map((a) => ({
             affiliate_id: a.affiliate_id,
+            shop_id: shops[0].shop_id,
+            shop_name: shops[0].shop_name,
             name: a.affiliate_name,
             username: a.affiliate_username,
-            gmv: Number(a.sales || 0),
-            orders: a.orders || 0,
-            clicks: a.clicks || 0,
-            commission: Number(a.est_commission || 0),
-            roi: Number(a.roi || 0),
-            total_buyers: a.total_buyers || 0,
-            new_buyers: a.new_buyers || 0,
-            channel: shopee.normalizeChannel(channel),
+            gmv: num(a.sales),
+            orders: num(a.orders),
+            clicks: num(a.clicks),
+            commission: num(a.est_commission),
+            roi: num(a.roi),
+            total_buyers: num(a.total_buyers),
+            new_buyers: num(a.new_buyers),
+            channel,
             status: 'active',
           }));
 
-          return res.json({ data: list, source: 'live' });
+          return respond(list, 'live');
         } catch (apiErr) {
           // Falling back to cache keeps the dashboard usable, but the reason
           // must reach the client or a misconfigured filter looks like "no data".
@@ -383,51 +471,34 @@ router.get('/affiliates', async (req, res) => {
       }
     }
 
-    // Fallback: cached DB
-    // Use period_type filter if data exists for it, otherwise fall back to most recent
+    // Fallback: each shop's most recent synced snapshot for this period + channel.
+    const params = [period, channel];
     let sql = `
-      SELECT a.affiliate_id, a.name, a.username,
-             COALESCE(a.channel, p.channel) AS channel,
-             a.status, a.followers, a.shop_id, a.last_active_at,
-             COALESCE(p.gmv, 0) AS gmv,
-             COALESCE(p.orders, 0) AS orders,
-             COALESCE(p.clicks, 0) AS clicks,
-             COALESCE(p.est_commission, 0) AS commission,
-             COALESCE(p.roi, 0) AS roi
-      FROM affiliates a
-      LEFT JOIN LATERAL (
-        SELECT * FROM affiliate_performance ap
-        WHERE ap.affiliate_id = a.affiliate_id
-          AND ap.shop_id = a.shop_id
-          AND ap.period_type = $1
-        ORDER BY ap.synced_at DESC LIMIT 1
-      ) p ON true
-      WHERE 1=1
+      SELECT a.affiliate_id, a.name, a.username, a.status, a.followers, a.shop_id, a.last_active_at,
+             s.shop_name, p.channel, p.gmv, p.orders, p.clicks,
+             p.est_commission AS commission, p.roi, p.total_buyers, p.new_buyers
+      FROM (${LATEST_SNAPSHOT_SQL}) p
+      JOIN affiliates a ON a.affiliate_id = p.affiliate_id AND a.shop_id = p.shop_id
+      LEFT JOIN shops s ON s.shop_id = p.shop_id
     `;
-    // $1 is the period filter above; user filters continue from $2.
-    const params = [period];
-    let idx = 2;
-
     if (shopId && shopId !== 'all') {
-      sql += ` AND a.shop_id = $${idx++}`;
       params.push(shopId);
+      sql += ` WHERE p.shop_id = $${params.length}`;
     }
-    if (channel && channel !== 'all') {
-      sql += ` AND (a.channel ILIKE $${idx} OR p.channel ILIKE $${idx})`;
-      params.push(channel);
-      idx++;
-    }
-    if (search) {
-      sql += ` AND (a.name ILIKE $${idx} OR a.username ILIKE $${idx})`;
-      params.push(`%${search}%`);
-      idx++;
-    }
-    sql += ` ORDER BY gmv DESC NULLS LAST LIMIT 200`;
 
     const { rows } = await query(sql, params);
+    const list = rows.map(r => ({
+      ...r,
+      gmv: num(r.gmv),
+      orders: num(r.orders),
+      clicks: num(r.clicks),
+      commission: num(r.commission),
+      roi: num(r.roi),
+      total_buyers: num(r.total_buyers),
+      new_buyers: num(r.new_buyers),
+    }));
 
-    // If empty and mock mode → return seeded mock from memory is handled by frontend
-    res.json({ data: rows, source: 'cache', ...(liveError ? { live_error: liveError } : {}) });
+    respond(list, 'cache', liveError ? { live_error: liveError } : {});
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -501,9 +572,7 @@ async function fetchAllTransactions(shop, period, maxPages = 100) {
 }
 
 async function buildLiveTrend(shopId, period) {
-  const { rows: shops } = shopId && shopId !== 'all'
-    ? await query(`SELECT * FROM shops WHERE shop_id = $1`, [shopId])
-    : await query(`SELECT * FROM shops WHERE status = 'active' ORDER BY shop_name`);
+  const shops = await resolveShops(shopId);
 
   const txs = [];
   const errors = [];
@@ -713,48 +782,17 @@ router.delete('/goals/:id', async (req, res) => {
 // ---------- Dashboard summary ----------
 router.get('/dashboard/summary', async (req, res) => {
   try {
-    const shopId = req.query.shop_id;
     const period = req.query.period || 'Last30d';
-    const channel = req.query.channel && req.query.channel !== 'all'
-      ? req.query.channel
-      : 'AllChannel';
-
-    // Aggregate over the newest snapshot per affiliate only. Summing the raw
-    // table would double count: it holds one row per period/channel/date range.
-    const params = [period, channel];
-    let filter = `WHERE period_type = $1 AND channel = $2`;
-    if (shopId && shopId !== 'all') {
-      params.push(shopId);
-      filter += ` AND shop_id = $${params.length}`; 
-    }
-
-    const sql = `
-      SELECT
-        COALESCE(SUM(gmv), 0) AS total_gmv,
-        COALESCE(SUM(orders), 0) AS total_orders,
-        COALESCE(SUM(est_commission), 0) AS total_commission,
-        COALESCE(SUM(clicks), 0) AS total_clicks,
-        COUNT(*) AS affiliate_count
-      FROM (
-        SELECT DISTINCT ON (affiliate_id, shop_id)
-               affiliate_id, shop_id, gmv, orders, est_commission, clicks
-        FROM affiliate_performance
-        ${filter}
-        ORDER BY affiliate_id, shop_id, synced_at DESC
-      ) latest
-    `;
-
-    const { rows } = await query(sql, params);
-    const s = rows[0] || {};
-    const roi = s.total_commission > 0 ? (Number(s.total_gmv) / Number(s.total_commission)) : 0;
+    const channel = shopee.normalizeChannel(req.query.channel && req.query.channel !== 'all' ? req.query.channel : null);
+    const t = await latestSnapshotTotals(period, { shopId: req.query.shop_id, channel });
 
     res.json({
-      total_gmv: Number(s.total_gmv),
-      total_orders: Number(s.total_orders),
-      total_commission: Number(s.total_commission),
-      total_clicks: Number(s.total_clicks),
-      affiliate_count: Number(s.affiliate_count),
-      avg_roi: Number(roi.toFixed(2)),
+      total_gmv: t.gmv,
+      total_orders: t.orders,
+      total_commission: t.commission,
+      total_clicks: t.clicks,
+      affiliate_count: t.affiliates,
+      avg_roi: t.commission > 0 ? Number((t.gmv / t.commission).toFixed(2)) : 0,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -826,13 +864,13 @@ router.post('/sync/:shopId', async (req, res) => {
           startDate,
           endDate,
           channel,
-          Number(a.sales || 0),
-          a.orders || 0,
-          a.clicks || 0,
-          Number(a.est_commission || 0),
-          Number(a.roi || 0),
-          a.total_buyers || 0,
-          a.new_buyers || 0,
+          num(a.sales),
+          num(a.orders),
+          num(a.clicks),
+          num(a.est_commission),
+          num(a.roi),
+          num(a.total_buyers),
+          num(a.new_buyers),
         ]
       );
       upserted++;
@@ -1029,47 +1067,57 @@ router.get('/campaigns/sync-all', async (_req, res) => {
 
 
 
+/** The selected shop, or every active shop for "all". */
+async function resolveShops(shopId) {
+  const { rows } = shopId && shopId !== 'all'
+    ? await query(`SELECT * FROM shops WHERE shop_id = $1`, [shopId])
+    : await query(`SELECT * FROM shops WHERE status = 'active' ORDER BY shop_name`);
+  return rows;
+}
+
+/**
+ * Run `fetchShop` for each shop in parallel, tagging rows with their shop.
+ * One failing shop is reported in `errors` instead of failing the whole list.
+ */
+async function collectFromShops(shops, fetchShop) {
+  const data = [];
+  const errors = [];
+  await Promise.all(shops.map(async (shop) => {
+    try {
+      const rows = await fetchShop(shop);
+      data.push(...rows.map(r => ({ ...r, shop_id: shop.shop_id, shop_name: shop.shop_name })));
+    } catch (e) {
+      console.warn(`[SHOP ${shop.shop_id}]`, e.message);
+      errors.push({ shop_id: shop.shop_id, name: shop.shop_name, error: e.message });
+    }
+  }));
+  return { data, errors };
+}
+
 // ---------- Products (from Shopee API) ----------
 router.get('/products', async (req, res) => {
   try {
-    const shopId = req.query.shop_id;
-    const mode = process.env.APP_MODE || 'mock';
-    if (mode !== 'live') {
+    if ((process.env.APP_MODE || 'mock') !== 'live') {
       return res.json({ data: [], source: 'mock' });
     }
 
-    if (!shopId || shopId === 'all') {
-      // Get first active shop
-      const { rows: shops } = await query(`SELECT * FROM shops WHERE status = 'active' LIMIT 1`);
-      if (!shops.length) return res.json({ data: [], source: 'empty' });
-      var shop = shops[0];
-    } else {
-      const { rows: shops } = await query(`SELECT * FROM shops WHERE shop_id = $1`, [shopId]);
-      if (!shops.length) return res.json({ data: [], source: 'empty' });
-      var shop = shops[0];
-    }
+    const shops = await resolveShops(req.query.shop_id);
+    if (!shops.length) return res.json({ data: [], source: 'empty' });
 
-    const token = await shopee.ensureValidToken(shop);
-    
-    // Fetch all pages of products
-    let allProducts = [];
-    let pageNo = 1;
-    while (pageNo <= 10) { // safety limit
-      try {
-        const data = await shopee.getProductList(shop.shop_id, token, { pageNo, pageSize: 50 });
-        const list = data.response?.list || data.response?.product_list || [];
-        allProducts.push(...list);
-        const more = data.response?.more ?? data.response?.has_next_page;
+    const { data, errors } = await collectFromShops(shops, async (shop) => {
+      const token = await shopee.ensureValidToken(shop);
+      const all = [];
+      for (let pageNo = 1; pageNo <= 10; pageNo++) { // safety limit
+        const page = await shopee.getProductList(shop.shop_id, token, { pageNo, pageSize: 50 });
+        const list = page.response?.list || page.response?.product_list || [];
+        all.push(...list);
+        const more = page.response?.more ?? page.response?.has_next_page;
         if (more === false || list.length < 50) break;
-        pageNo++;
-      } catch (e) {
-        // API might not support this endpoint
-        console.warn('[PRODUCTS] Error fetching page', pageNo, ':', e.message);
-        break;
       }
-    }
+      return all;
+    });
 
-    res.json({ data: allProducts, source: 'live', count: allProducts.length });
+    res.json({ data, errors, source: 'live', count: data.length });
   } catch (e) {
     res.json({ data: [], source: 'error', error: e.message });
   }
@@ -1078,49 +1126,17 @@ router.get('/products', async (req, res) => {
 // ---------- Transactions (from Shopee API) ----------
 router.get('/transactions', async (req, res) => {
   try {
-    const shopId = req.query.shop_id;
-    const period = req.query.period || 'Last30d';
-    const mode = process.env.APP_MODE || 'mock';
-    
-    if (mode !== 'live') {
+    if ((process.env.APP_MODE || 'mock') !== 'live') {
       return res.json({ data: [], source: 'mock' });
     }
 
-    // Get shop
-    let shop;
-    if (shopId && shopId !== 'all') {
-      const { rows: shops } = await query(`SELECT * FROM shops WHERE shop_id = $1`, [shopId]);
-      shop = shops[0];
-    } else {
-      const { rows: shops } = await query(`SELECT * FROM shops WHERE status = 'active' LIMIT 1`);
-      shop = shops[0];
-    }
-    
-    if (!shop) return res.json({ data: [], source: 'empty' });
+    const period = req.query.period || 'Last30d';
+    const shops = await resolveShops(req.query.shop_id);
+    if (!shops.length) return res.json({ data: [], source: 'empty' });
 
-    const token = await shopee.ensureValidToken(shop);
-    const { startDate, endDate } = periodRange(period);
+    const { data, errors } = await collectFromShops(shops, (shop) => fetchAllTransactions(shop, period, 10));
 
-    // Fetch all pages of transactions
-    let allTransactions = [];
-    let pageNo = 1;
-    while (pageNo <= 10) {
-      try {
-        const data = await shopee.getPerformanceList(shop.shop_id, token, {
-          periodType: period, startDate, endDate, pageNo, pageSize: 50
-        });
-        const list = data.response?.list || data.response?.performance_list || [];
-        allTransactions.push(...list);
-        const more = data.response?.more ?? data.response?.has_next_page;
-        if (more === false || list.length < 50) break;
-        pageNo++;
-      } catch (e) {
-        console.warn('[TRANSACTIONS] Error fetching page', pageNo, ':', e.message);
-        break;
-      }
-    }
-
-    res.json({ data: allTransactions, source: 'live', count: allTransactions.length });
+    res.json({ data, errors, source: 'live', count: data.length });
   } catch (e) {
     res.json({ data: [], source: 'error', error: e.message });
   }
@@ -1131,38 +1147,10 @@ router.get('/dashboard/compare', async (req, res) => {
   try {
     const shopId = req.query.shop_id;
     
-    // Get data for both periods
-    const periods = ['Last7d', 'Last30d'];
-    const results = {};
-    
-    for (const period of periods) {
-      let sql = `
-        SELECT
-          COALESCE(SUM(gmv), 0) AS total_gmv,
-          COALESCE(SUM(orders), 0) AS total_orders,
-          COALESCE(SUM(est_commission), 0) AS total_commission,
-          COALESCE(SUM(clicks), 0) AS total_clicks,
-          COUNT(DISTINCT affiliate_id) AS affiliate_count
-        FROM affiliate_performance
-        WHERE period_type = $1
-      `;
-      const params = [period];
-      
-      if (shopId && shopId !== 'all') {
-        sql += ` AND shop_id = $2`;
-        params.push(shopId);
-      }
-      
-      const { rows } = await query(sql, params);
-      const s = rows[0] || {};
-      results[period] = {
-        gmv: Number(s.total_gmv || 0),
-        orders: Number(s.total_orders || 0),
-        commission: Number(s.total_commission || 0),
-        clicks: Number(s.total_clicks || 0),
-        affiliates: Number(s.affiliate_count || 0),
-      };
-    }
+    const results = {
+      Last7d: await latestSnapshotTotals('Last7d', { shopId }),
+      Last30d: await latestSnapshotTotals('Last30d', { shopId }),
+    };
 
     // Calculate changes
     const r7 = results['Last7d'] || {};
@@ -1259,16 +1247,9 @@ router.post('/alerts/check', async (_req, res) => {
       LIMIT 10
     `);
 
-    // Check for total GMV drop vs previous period (compare Last30d vs Last7d extrapolated)
-    const { rows: summary } = await query(`
-      SELECT
-        SUM(CASE WHEN period_type = 'Last30d' THEN gmv ELSE 0 END) AS gmv_30d,
-        SUM(CASE WHEN period_type = 'Last7d' THEN gmv * 4 ELSE 0 END) AS gmv_7d_extrapolated,
-        SUM(CASE WHEN period_type = 'Last30d' THEN orders ELSE 0 END) AS orders_30d,
-        SUM(CASE WHEN period_type = 'Last7d' THEN orders * 4 ELSE 0 END) AS orders_7d_extrapolated
-      FROM affiliate_performance
-      WHERE period_type IN ('Last30d', 'Last7d')
-    `);
+    // GMV/commission drop: Last7d extrapolated to 30 days vs Last30d.
+    const t30 = await latestSnapshotTotals('Last30d');
+    const t7 = await latestSnapshotTotals('Last7d');
 
     const alerts = [];
 
@@ -1284,9 +1265,8 @@ router.post('/alerts/check', async (_req, res) => {
       });
     }
 
-    const s = summary[0] || {};
-    const gmv30 = Number(s.gmv_30d || 0);
-    const gmv7ext = Number(s.gmv_7d_extrapolated || 0);
+    const gmv30 = t30.gmv;
+    const gmv7ext = t7.gmv * (30 / 7);
     if (gmv30 > 0 && gmv7ext > 0 && gmv7ext < gmv30 * 0.7) {
       alerts.push({
         type: 'warning',
@@ -1306,16 +1286,8 @@ router.post('/alerts/check', async (_req, res) => {
     }
 
     // Commission drop check
-    const { rows: commRows } = await query(`
-      SELECT
-        SUM(CASE WHEN period_type = 'Last30d' THEN est_commission ELSE 0 END) AS comm_30d,
-        SUM(CASE WHEN period_type = 'Last7d' THEN est_commission * 4 ELSE 0 END) AS comm_7d_ext
-      FROM affiliate_performance
-      WHERE period_type IN ('Last30d', 'Last7d')
-    `);
-    const c = commRows[0] || {};
-    const comm30 = Number(c.comm_30d || 0);
-    const comm7ext = Number(c.comm_7d_ext || 0);
+    const comm30 = t30.commission;
+    const comm7ext = t7.commission * (30 / 7);
     if (comm30 > 0 && comm7ext > 0 && comm7ext < comm30 * 0.7) {
       alerts.push({
         type: 'warning',
@@ -1341,50 +1313,41 @@ router.post('/alerts/check', async (_req, res) => {
 });
 
 // ---------- Export (CSV) ----------
+/** Quote a CSV cell; a leading =+-@ is neutralised so Excel won't run it as a formula. */
+function csvCell(v) {
+  let str = String(v ?? '');
+  if (/^[=+\-@]/.test(str)) str = "'" + str;
+  return `"${str.replace(/"/g, '""')}"`;
+}
+
 router.get('/export/csv', async (req, res) => {
   try {
     const shopId = req.query.shop_id;
     const period = req.query.period || 'Last30d';
-    const channel = req.query.channel && req.query.channel !== 'all' ? req.query.channel : null;
+    const channel = shopee.normalizeChannel(req.query.channel && req.query.channel !== 'all' ? req.query.channel : null);
 
+    const params = [period, channel];
     let sql = `
-      SELECT a.name, a.username, a.channel AS aff_channel,
-             COALESCE(p.gmv, 0) AS gmv,
-             COALESCE(p.orders, 0) AS orders,
-             COALESCE(p.clicks, 0) AS clicks,
-             COALESCE(p.est_commission, 0) AS commission,
-             COALESCE(p.roi, 0) AS roi,
-             COALESCE(p.total_buyers, 0) AS total_buyers,
-             COALESCE(p.new_buyers, 0) AS new_buyers,
-             p.period_type, p.start_date, p.end_date
-      FROM affiliates a
-      LEFT JOIN LATERAL (
-        SELECT * FROM affiliate_performance ap
-        WHERE ap.affiliate_id = a.affiliate_id AND ap.shop_id = a.shop_id
-          AND ap.period_type = $1
-        ORDER BY ap.synced_at DESC LIMIT 1
-      ) p ON true
-      WHERE 1=1
+      SELECT a.name, a.username, s.shop_name, p.channel AS aff_channel,
+             p.gmv, p.orders, p.clicks, p.est_commission AS commission, p.roi,
+             p.total_buyers, p.new_buyers
+      FROM (${LATEST_SNAPSHOT_SQL}) p
+      JOIN affiliates a ON a.affiliate_id = p.affiliate_id AND a.shop_id = p.shop_id
+      LEFT JOIN shops s ON s.shop_id = p.shop_id
     `;
-    const params = [period];
-    let idx = 2;
-
     if (shopId && shopId !== 'all') {
-      sql += ` AND a.shop_id = $${idx++}`;
       params.push(shopId);
+      sql += ` WHERE p.shop_id = $${params.length}`;
     }
-    if (channel) {
-      sql += ` AND p.channel = $${idx++}`;
-      params.push(channel);
-    }
-    sql += ` ORDER BY gmv DESC NULLS LAST`;
+    sql += ` ORDER BY p.gmv DESC NULLS LAST`;
 
     const { rows } = await query(sql, params);
 
     // Build CSV
-    const header = 'Nama,Username,Channel,GMV,Orders,Clicks,Komisi,ROI,Total Buyers,New Buyers';
+    const header = 'Nama,Username,Toko,Channel,GMV,Orders,Clicks,Komisi,ROI,Total Buyers,New Buyers';
     const csvRows = rows.map(r =>
-      `"${(r.name || '').replace(/"/g, '""')}","${r.username || ''}","${r.aff_channel || ''}",${r.gmv},${r.orders},${r.clicks},${r.commission},${r.roi},${r.total_buyers},${r.new_buyers}`
+      [r.name, r.username, r.shop_name, r.aff_channel].map(csvCell).join(',') + ',' +
+      [r.gmv, r.orders, r.clicks, r.commission, r.roi, r.total_buyers, r.new_buyers].map(num).join(',')
     );
     const csv = [header, ...csvRows].join('\n');
 
