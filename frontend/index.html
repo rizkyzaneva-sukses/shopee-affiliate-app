@@ -106,7 +106,7 @@
           </select>
           <button id="btnExport" onclick="exportCSV()" class="btn btn-ghost"><i class="fas fa-download text-xs"></i> Export</button>
           <button id="btnCalculator" onclick="showCalculator()" class="btn btn-ghost"><i class="fas fa-calculator text-xs"></i> Kalkulator</button>
-          <button id="btnRefresh" onclick="refreshAll()" class="btn btn-primary"><i class="fas fa-sync-alt text-xs"></i> Refresh</button>
+          <button id="btnRefresh" onclick="refreshAll(true)" class="btn btn-primary"><i class="fas fa-sync-alt text-xs"></i> Refresh</button>
         </div>
       </div>
     </header>
@@ -134,6 +134,7 @@
             <h3 class="text-sm font-semibold text-slate-200">Tren Harian</h3>
             <span class="text-[10px] text-slate-600" id="trendPeriod">30 hari</span>
           </div>
+          <p id="trendNote" class="hidden text-xs text-slate-500 mb-2"></p>
           <div style="height:240px"><canvas id="gmvChart"></canvas></div>
         </div>
         <div class="card p-4"><h3 class="text-sm font-semibold text-slate-200 mb-3">🏆 Top 5 Afiliator</h3><div id="topAffiliates"></div></div>

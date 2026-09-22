@@ -236,8 +236,9 @@ async function loadAffiliates() {
   updateModeBadge();
 }
 
-async function loadTrend() {
+async function loadTrend(fresh = false) {
   const params = new URLSearchParams();
+  if (fresh) params.set('fresh', '1');
   if (state.shop !== 'all') params.set('shop_id', state.shop);
   params.set('period', state.period);
 
@@ -538,6 +539,20 @@ function renderChart() {
 
   // Use real trend data from API
   const t = state.trend;
+
+  const note = document.getElementById('trendNote');
+  if (note) {
+    let msg = '';
+    if (t?.source === 'unavailable') {
+      msg = 'Data harian belum tersedia: transaksi dari Shopee tidak membawa tanggal order.';
+    } else if (t?.errors?.length) {
+      msg = `Sebagian toko gagal dimuat (${t.errors.map(e => e.name || e.shop_id).join(', ')}) — grafik belum lengkap.`;
+    } else if (t?.source === 'transactions' && !t.transactions) {
+      msg = 'Belum ada transaksi di periode ini.';
+    }
+    note.textContent = msg;
+    note.classList.toggle('hidden', !msg);
+  }
 
   if (!t || !t.labels || !t.labels.length || t.gmv.every(v => v === 0)) {
     gmvChart = new Chart(canvas.getContext('2d'), {
@@ -1094,14 +1109,14 @@ function switchTab(tab) {
   if (tab === 'transactions') loadTransactions();
 }
 
-async function refreshAll() {
+async function refreshAll(fresh = false) {
   const btn = document.getElementById('btnRefresh');
   const icon = btn?.querySelector('i');
   if (icon) icon.classList.add('fa-spin');
   if (btn) btn.disabled = true;
 
   await loadMode();
-  await Promise.all([loadShops(), loadAffiliates(), loadCampaigns(), loadTrend(), loadGoals(), checkAlerts(), loadComparison()]);
+  await Promise.all([loadShops(), loadAffiliates(), loadCampaigns(), loadTrend(fresh), loadGoals(), checkAlerts(), loadComparison()]);
 
   if (icon) icon.classList.remove('fa-spin');
   if (btn) btn.disabled = false;

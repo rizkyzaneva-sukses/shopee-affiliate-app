@@ -448,8 +448,129 @@ router.get('/campaigns', async (req, res) => {
 });
 
 // ---------- Dashboard Trend (daily GMV/orders) ----------
+
+// Shopee's affiliate-performance totals cover a whole period, so a daily
+// trend has to be rebuilt from order-level transactions. The response field
+// names are not documented publicly, hence the candidate lists.
+const TX_DATE_FIELDS = ['order_time', 'create_time', 'purchase_time', 'order_create_time',
+  'order_created_time', 'ctime', 'order_date', 'complete_time', 'date'];
+const TX_AMOUNT_FIELDS = ['payment_amount', 'gmv', 'amount', 'order_amount', 'purchase_value', 'sales'];
+const TX_COMMISSION_FIELDS = ['estimated_commission', 'est_commission', 'commission'];
+
+const TREND_CACHE_MS = 10 * 60 * 1000;
+const trendCache = new Map();
+
+function pickField(obj, fields) {
+  for (const f of fields) {
+    if (obj[f] !== undefined && obj[f] !== null && obj[f] !== '') return obj[f];
+  }
+  return undefined;
+}
+
+/** Jakarta calendar date (YYYY-MM-DD) of a unix-seconds/ms/date-string value. */
+function jakartaDateKey(value) {
+  let ms;
+  if (typeof value === 'number' || /^\d+$/.test(String(value))) {
+    const n = Number(value);
+    ms = n < 1e12 ? n * 1000 : n;
+  } else {
+    ms = Date.parse(value);
+  }
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms + 7 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+async function fetchAllTransactions(shop, period, maxPages = 100) {
+  const token = await shopee.ensureValidToken(shop);
+  const { startDate, endDate } = periodRange(period);
+  const all = [];
+  for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
+    const data = await shopee.getPerformanceList(shop.shop_id, token, {
+      periodType: period, startDate, endDate, pageNo, pageSize: 50,
+    });
+    const list = data.response?.list || data.response?.performance_list || [];
+    all.push(...list);
+    const more = data.response?.more ?? data.response?.has_next_page;
+    if (more === false || list.length < 50) break;
+  }
+  return all;
+}
+
+async function buildLiveTrend(shopId, period) {
+  const { rows: shops } = shopId && shopId !== 'all'
+    ? await query(`SELECT * FROM shops WHERE shop_id = $1`, [shopId])
+    : await query(`SELECT * FROM shops WHERE status = 'active' ORDER BY shop_name`);
+
+  const txs = [];
+  const errors = [];
+  await Promise.all(shops.map(async (shop) => {
+    try {
+      txs.push(...await fetchAllTransactions(shop, period));
+    } catch (e) {
+      console.warn(`[TREND] Shop ${shop.shop_id} gagal:`, e.message);
+      errors.push({ shop_id: shop.shop_id, name: shop.shop_name, error: e.message });
+    }
+  }));
+
+  // Day range in Jakarta time, from the period start through today.
+  const { startDate } = periodRange(period);
+  const startKey = `${startDate.slice(0, 4)}-${startDate.slice(4, 6)}-${startDate.slice(6, 8)}`;
+  const todayKey = jakartaDateKey(Date.now());
+  const keys = [];
+  for (let d = new Date(startKey + 'T00:00:00Z'); d.toISOString().slice(0, 10) <= todayKey; d = new Date(d.getTime() + 86400000)) {
+    keys.push(d.toISOString().slice(0, 10));
+  }
+
+  const byDay = Object.fromEntries(keys.map(k => [k, { gmv: 0, commission: 0, orders: new Set(), rows: 0 }]));
+  let dated = 0;
+  for (const t of txs) {
+    const raw = pickField(t, TX_DATE_FIELDS);
+    const key = raw === undefined ? null : jakartaDateKey(raw);
+    if (!key) continue;
+    dated++;
+    const day = byDay[key];
+    if (!day) continue;
+    day.gmv += Number(pickField(t, TX_AMOUNT_FIELDS) || 0);
+    day.commission += Number(pickField(t, TX_COMMISSION_FIELDS) || 0);
+    const orderId = t.order_id ?? t.order_sn ?? t.sn;
+    if (orderId !== undefined) day.orders.add(String(orderId)); else day.rows++;
+  }
+
+  const result = {
+    labels: keys.map(k => new Date(k + 'T00:00:00Z').toLocaleDateString('id-ID', { day: 'numeric', month: 'short', timeZone: 'UTC' })),
+    gmv: keys.map(k => byDay[k].gmv / 1e6), // convert to millions
+    orders: keys.map(k => byDay[k].orders.size + byDay[k].rows),
+    commissions: keys.map(k => byDay[k].commission),
+    source: 'transactions',
+    transactions: txs.length,
+    errors,
+  };
+
+  if (txs.length && !dated) {
+    // Transactions came back but none carried a recognisable date field —
+    // report what Shopee actually sent so the field list can be extended.
+    result.source = 'unavailable';
+    result.sample_keys = Object.keys(txs[0]);
+    console.warn('[TREND] Tidak ada field tanggal dikenali. Field transaksi:', result.sample_keys.join(', '));
+  }
+  return result;
+}
+
 router.get('/dashboard/trend', async (req, res) => {
   try {
+    if ((process.env.APP_MODE || 'mock') === 'live') {
+      const period = req.query.period || 'Last30d';
+      const cacheKey = `${req.query.shop_id || 'all'}|${period}`;
+      const hit = trendCache.get(cacheKey);
+      if (hit && Date.now() - hit.at < TREND_CACHE_MS && req.query.fresh !== '1') {
+        return res.json(hit.data);
+      }
+      const data = await buildLiveTrend(req.query.shop_id, period);
+      if (!data.errors.length) trendCache.set(cacheKey, { at: Date.now(), data });
+      return res.json(data);
+    }
+
+    // Mock mode: approximate from stored snapshots.
     const shopId = req.query.shop_id;
     const period = req.query.period || 'Last30d';
     const days = { Last7d: 7, Last30d: 30, Month: 30 }[period] || 30;
