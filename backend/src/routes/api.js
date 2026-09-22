@@ -523,7 +523,7 @@ router.get('/dashboard/trend', async (req, res) => {
     const period = req.query.period || 'Last30d';
     const channel = shopee.normalizeChannel(req.query.channel && req.query.channel !== 'all' ? req.query.channel : null);
     const shops = await resolveShops(req.query.shop_id);
-    const { days, rows, errors, latest } = await daily.dailySeries(shops, period, channel);
+    const { days, rows, errors, pending, latest } = await daily.dailySeries(shops, period, channel);
 
     res.json({
       labels: days.map(d => new Date(d + 'T00:00:00Z').toLocaleDateString('id-ID', { day: 'numeric', month: 'short', timeZone: 'UTC' })),
@@ -533,6 +533,7 @@ router.get('/dashboard/trend', async (req, res) => {
       source: 'shop_daily',
       latest_date: latest,
       errors,
+      pending,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });

@@ -12,7 +12,10 @@ const shopee = require('./shopee');
 
 const MAX_BACKFILL_DAYS = 90;      // Shopee serves Day data for ~3 months
 const REFRESH_RECENT_DAYS = 3;     // days before the latest date that still change
-const DAY_CONCURRENCY = 5;         // parallel Day calls per shop
+const DAY_CONCURRENCY = 2;         // parallel Day calls per shop (global Shopee gate still applies)
+// How long a dashboard request waits for backfill before answering with what
+// is stored; the rest keeps filling in the background.
+const RESPONSE_BUDGET_MS = 12000;
 
 const num = (v) => {
   const n = Number(v);
@@ -76,27 +79,36 @@ async function fill(shop, fromIso, channel) {
   const recentFrom = isoAddDays(latest, -(REFRESH_RECENT_DAYS - 1));
   const todo = wanted.filter(d => !have.has(d) || d >= recentFrom);
 
-  await runLimited(todo, DAY_CONCURRENCY, async (day) => {
-    const { startDate, endDate } = shopee.amsRange('Day', latest, day);
-    const data = await shopee.getShopPerformance(shop.shop_id, token, {
-      periodType: 'Day', startDate, endDate, channel,
-    });
-    const r = data.response || {};
-    await query(
-      `INSERT INTO shop_daily_performance
-         (shop_id, date, channel, sales, orders, clicks, est_commission, items_sold, total_buyers, new_buyers, synced_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-       ON CONFLICT (shop_id, date, channel) DO UPDATE SET
-         sales = EXCLUDED.sales, orders = EXCLUDED.orders, clicks = EXCLUDED.clicks,
-         est_commission = EXCLUDED.est_commission, items_sold = EXCLUDED.items_sold,
-         total_buyers = EXCLUDED.total_buyers, new_buyers = EXCLUDED.new_buyers,
-         synced_at = NOW()`,
-      [shop.shop_id, day, channel, num(r.sales), num(r.orders), num(r.clicks),
-       num(r.est_commission), num(r.gross_item_sold), num(r.total_buyers), num(r.new_buyers)]
-    );
-  });
+  // A failed day must not discard the others: collect and report at the end.
+  const failed = [];
+  await runLimited(todo, DAY_CONCURRENCY, (day) => fetchDay(shop, token, latest, day, channel).catch((e) => {
+    failed.push(`${day}: ${e.message}`);
+  }));
+  if (failed.length) {
+    throw new Error(`${failed.length} hari gagal diambil (${failed[0]})`);
+  }
 
   return latest;
+}
+
+async function fetchDay(shop, token, latest, day, channel) {
+  const { startDate, endDate } = shopee.amsRange('Day', latest, day);
+  const data = await shopee.getShopPerformance(shop.shop_id, token, {
+    periodType: 'Day', startDate, endDate, channel,
+  });
+  const r = data.response || {};
+  await query(
+    `INSERT INTO shop_daily_performance
+       (shop_id, date, channel, sales, orders, clicks, est_commission, items_sold, total_buyers, new_buyers, synced_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+     ON CONFLICT (shop_id, date, channel) DO UPDATE SET
+       sales = EXCLUDED.sales, orders = EXCLUDED.orders, clicks = EXCLUDED.clicks,
+       est_commission = EXCLUDED.est_commission, items_sold = EXCLUDED.items_sold,
+       total_buyers = EXCLUDED.total_buyers, new_buyers = EXCLUDED.new_buyers,
+       synced_at = NOW()`,
+    [shop.shop_id, day, channel, num(r.sales), num(r.orders), num(r.clicks),
+     num(r.est_commission), num(r.gross_item_sold), num(r.total_buyers), num(r.new_buyers)]
+  );
 }
 
 /**
@@ -105,23 +117,28 @@ async function fill(shop, fromIso, channel) {
  */
 async function dailySeries(shops, period, channel = 'AllChannel') {
   const errors = [];
+  const pending = [];
   const latestDates = [];
 
-  // The start depends on the latest date, which is per shop: resolve it first
-  // with a generous window, then trim to the period.
+  // Each shop gets RESPONSE_BUDGET_MS; a shop still backfilling is reported
+  // as pending and keeps filling in the background (ensureDaily dedupes).
+  const budget = new Promise((r) => setTimeout(r, RESPONSE_BUDGET_MS, 'timeout'));
   await Promise.all(shops.map(async (shop) => {
     try {
       const token = await shopee.ensureValidToken(shop);
       const latest = await shopee.getLatestDataDate(shop.shop_id, token);
-      await ensureDaily(shop, periodStart(period, latest), channel);
       latestDates.push(latest);
+      const fill = ensureDaily(shop, periodStart(period, latest), channel);
+      fill.catch((e) => console.warn(`[DAILY] Shop ${shop.shop_id} gagal:`, e.message));
+      if (await Promise.race([fill, budget]) === 'timeout') {
+        pending.push({ shop_id: shop.shop_id, name: shop.shop_name });
+      }
     } catch (e) {
-      console.warn(`[DAILY] Shop ${shop.shop_id} gagal:`, e.message);
       errors.push({ shop_id: shop.shop_id, name: shop.shop_name, error: e.message });
     }
   }));
 
-  if (!latestDates.length) return { days: [], rows: {}, errors, latest: null };
+  if (!latestDates.length) return { days: [], rows: {}, errors, pending, latest: null };
 
   const latest = latestDates.sort().at(-1);
   const from = periodStart(period, latest);
@@ -141,7 +158,7 @@ async function dailySeries(shops, period, channel = 'AllChannel') {
     commission: num(r.commission), items_sold: num(r.items_sold),
   }]));
 
-  return { days, rows: byDay, errors, latest };
+  return { days, rows: byDay, errors, pending, latest };
 }
 
 /** Background prefill so the dashboard rarely waits on Shopee. */

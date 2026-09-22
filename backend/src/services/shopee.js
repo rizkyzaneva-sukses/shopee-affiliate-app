@@ -124,12 +124,48 @@ async function getShopInfo(shopId, accessToken) {
   });
 }
 
-async function shopeeRequest({ method = 'GET', path, shopId, accessToken, body = null, queryParams = {} }) {
-  const cfg = getConfig();
-  if (cfg.mode === 'mock') {
-    throw new Error('APP_MODE is mock — real API disabled');
-  }
+// ---------- Request throttling ----------
 
+/**
+ * Shopee rate-limits per partner app, so every call goes through one shared
+ * gate: a cap on in-flight requests plus a minimum gap between request
+ * starts. Rate-limited replies are retried with exponential backoff.
+ */
+const MAX_CONCURRENCY = Math.max(1, Number(process.env.SHOPEE_MAX_CONCURRENCY) || 2);
+const MIN_INTERVAL_MS = Math.max(0, Number(process.env.SHOPEE_MIN_INTERVAL_MS) || 300);
+const RATE_LIMIT_RETRIES = 5;
+const RETRY_BASE_MS = 2000;
+
+let inFlight = 0;
+let lastStart = 0;
+const waiters = [];
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function acquireSlot() {
+  if (inFlight >= MAX_CONCURRENCY) {
+    await new Promise((resolve) => waiters.push(resolve));
+  }
+  inFlight++;
+  // Space out request starts even when slots are free.
+  const wait = lastStart + MIN_INTERVAL_MS - Date.now();
+  lastStart = Math.max(Date.now(), lastStart + MIN_INTERVAL_MS);
+  if (wait > 0) await sleep(wait);
+}
+
+function releaseSlot() {
+  inFlight--;
+  const next = waiters.shift();
+  if (next) next();
+}
+
+function isRateLimited(err) {
+  return err.status === 429 || /rate.?limit|too many requests/i.test(`${err.code} ${err.message}`);
+}
+
+/** One signed request. The timestamp is regenerated on every attempt. */
+async function sendOnce({ method, path, shopId, accessToken, body, queryParams }) {
+  const cfg = getConfig();
   const timestamp = Math.floor(Date.now() / 1000);
   const sign = generateSign(path, timestamp, accessToken || '', shopId || '');
 
@@ -152,15 +188,41 @@ async function shopeeRequest({ method = 'GET', path, shopId, accessToken, body =
   }
 
   const res = await fetch(url, options);
-  const data = await res.json();
+  const data = await res.json().catch(() => {
+    const err = new Error(`Shopee HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  });
 
   if (data.error) {
     const err = new Error(data.message || data.error);
     err.code = data.error;
     err.requestId = data.request_id;
+    err.status = res.status;
     throw err;
   }
   return data;
+}
+
+async function shopeeRequest({ method = 'GET', path, shopId, accessToken, body = null, queryParams = {} }) {
+  if (getConfig().mode === 'mock') {
+    throw new Error('APP_MODE is mock — real API disabled');
+  }
+
+  for (let attempt = 0; ; attempt++) {
+    await acquireSlot();
+    try {
+      return await sendOnce({ method, path, shopId, accessToken, body, queryParams });
+    } catch (e) {
+      if (!isRateLimited(e) || attempt >= RATE_LIMIT_RETRIES) throw e;
+      const delay = RETRY_BASE_MS * 2 ** attempt + Math.random() * 500;
+      console.warn(`[SHOPEE] Rate limit ${path} (shop ${shopId}) — coba lagi dalam ${Math.round(delay / 1000)}s`);
+      // Hold the slot while backing off so other calls slow down too.
+      await sleep(delay);
+    } finally {
+      releaseSlot();
+    }
+  }
 }
 
 // ---------- Period ranges ----------

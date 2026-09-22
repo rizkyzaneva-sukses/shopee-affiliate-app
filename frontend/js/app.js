@@ -265,7 +265,12 @@ async function loadTrend(fresh = false) {
   const res = await apiGet('/api/dashboard/trend?' + params.toString());
   state.trend = res && res.labels ? res : { labels: [], gmv: [], orders: [], failed: true };
   renderChart();
+
+  // Shops still backfilling daily data: reload until the chart is complete.
+  clearTimeout(trendRetryTimer);
+  if (res?.pending?.length) trendRetryTimer = setTimeout(() => loadTrend(), 15000);
 }
+let trendRetryTimer;
 
 async function loadGoals() {
   const res = await apiGet('/api/goals');
@@ -597,6 +602,8 @@ function renderChart() {
     let msg = '';
     if (t?.failed) {
       msg = 'Gagal memuat tren harian (server error atau timeout). Coba klik Refresh.';
+    } else if (t?.pending?.length) {
+      msg = `Sedang mengambil data harian dari Shopee untuk ${t.pending.length} toko — grafik akan lengkap otomatis.`;
     } else if (t?.errors?.length) {
       msg = `Toko gagal dimuat — ${t.errors.map(e => `${e.name || e.shop_id}: ${e.error}`).join('; ')}`;
     } else if (t?.source === 'mock') {
