@@ -9,6 +9,7 @@ const fs = require('fs');
 const apiRoutes = require('./routes/api');
 const { requireAdmin, getAdminToken } = require('./middleware/auth');
 const { startTokenScheduler } = require('./services/token-scheduler');
+const { encryptExistingTokens } = require('./services/token-crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -80,5 +81,13 @@ app.listen(PORT, '0.0.0.0', () => {
     console.warn('[WARN] SHOPEE_REDIRECT_URI belum diset — tombol "Hubungkan Toko" akan gagal.');
   }
 
-  startTokenScheduler();
+  if (process.env.TOKEN_ENCRYPTION_KEY) {
+    encryptExistingTokens()
+      .then((n) => n && console.log(`[TOKEN] ${n} toko: token lama dienkripsi`))
+      .catch((e) => console.error('[TOKEN] Enkripsi token lama gagal:', e.message))
+      .finally(startTokenScheduler);
+  } else {
+    console.warn('[WARN] TOKEN_ENCRYPTION_KEY belum diset — token toko disimpan tanpa enkripsi.');
+    startTokenScheduler();
+  }
 });

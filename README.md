@@ -39,6 +39,8 @@ APP_MODE=mock
 
 # Wajib di production — tanpa ini semua endpoint /api dibalas 503
 ADMIN_TOKEN=hasil_dari_openssl_rand_hex_32
+# Enkripsi token toko di database — jangan diganti setelah diisi
+TOKEN_ENCRYPTION_KEY=hasil_dari_openssl_rand_hex_32
 
 DATABASE_URL=postgres://USER:PASSWORD@HOST:5432/DBNAME
 
@@ -206,5 +208,9 @@ ditandai **publik**.
   server membalas 503 — sengaja gagal-tertutup agar token toko tidak bocor.
 - CORS mati secara default (frontend satu origin dengan backend). Set
   `CORS_ORIGIN` hanya bila frontend di-host terpisah.
-- `access_token` / `refresh_token` masih disimpan **plaintext** di PostgreSQL.
-  Pertimbangkan enkripsi at-rest bila database dapat diakses pihak lain.
+- `access_token` / `refresh_token` dienkripsi (AES-256-GCM) di PostgreSQL bila
+  `TOKEN_ENCRYPTION_KEY` diisi. Token lama yang masih plaintext otomatis
+  dienkripsi saat app start. **Simpan kunci ini baik-baik**: bila hilang atau
+  diganti, token tidak bisa dibaca dan semua toko harus diotorisasi ulang.
+  Tanpa kunci, token disimpan plaintext (ada peringatan di log).
+- `GET /api/diag/raw/:shopId` hanya menerima path `/api/v2/ams/...`.

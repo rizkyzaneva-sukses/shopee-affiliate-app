@@ -5,6 +5,7 @@
 
 const crypto = require('crypto');
 const { query } = require('../db');
+const { encryptToken, decryptToken } = require('./token-crypto');
 
 function getConfig() {
   return {
@@ -543,7 +544,7 @@ async function ensureValidToken(shop) {
   }
 
   if (!isExpiring(shop.token_expire_at, TOKEN_BUFFER_MS)) {
-    return shop.access_token;
+    return decryptToken(shop.access_token);
   }
 
   return refreshShopToken(shop.shop_id, TOKEN_BUFFER_MS);
@@ -574,12 +575,12 @@ async function doRefreshShopToken(shopId, bufferMs) {
     throw new Error(`Shop ${shopId} belum punya token. Lakukan authorization dulu.`);
   }
   if (shop.access_token && !isExpiring(shop.token_expire_at, bufferMs)) {
-    return shop.access_token;
+    return decryptToken(shop.access_token);
   }
 
   // Network errors propagate without touching status — only a Shopee
   // rejection means the token itself is bad.
-  const result = await refreshAccessToken(shop.shop_id, shop.refresh_token);
+  const result = await refreshAccessToken(shop.shop_id, decryptToken(shop.refresh_token));
   if (result.error) {
     const msg = `Refresh token gagal: ${result.message || result.error}`;
     await query(
@@ -598,7 +599,9 @@ async function doRefreshShopToken(shopId, bufferMs) {
     `UPDATE shops SET access_token = $1, refresh_token = $2, token_expire_at = $3,
        status = CASE WHEN status = 'expired' THEN 'active' ELSE status END, updated_at = NOW()
      WHERE shop_id = $4`,
-    [result.access_token, result.refresh_token || shop.refresh_token, newExpire, shop.shop_id]
+    [encryptToken(result.access_token),
+     result.refresh_token ? encryptToken(result.refresh_token) : shop.refresh_token,
+     newExpire, shop.shop_id]
   );
 
   return result.access_token;

@@ -3,6 +3,7 @@ const router = express.Router();
 const { query } = require('../db');
 const shopee = require('../services/shopee');
 const daily = require('../services/daily');
+const { encryptToken } = require('../services/token-crypto');
 
 /** Finite number or 0 — Shopee sometimes sends "NaN" (e.g. ROI with zero commission). */
 function num(v) {
@@ -148,7 +149,7 @@ router.get('/auth/callback', async (req, res) => {
          auth_time = NOW(),
          updated_at = NOW()`,
       [shopId, shopName, region || process.env.SHOPEE_REGION || 'ID',
-       token.access_token, token.refresh_token, expireAt]
+       encryptToken(token.access_token), encryptToken(token.refresh_token), expireAt]
     );
 
     await query(
@@ -207,6 +208,11 @@ router.get('/diag/raw/:shopId', async (req, res) => {
     const token = await shopee.ensureValidToken(rows[0]);
     const { path, ...queryParams } = req.query;
     if (!path) return res.status(400).json({ error: 'Parameter "path" wajib diisi' });
+    // Diagnostics are for AMS parameters only — don't let the shop's token
+    // reach order/buyer/product endpoints through this passthrough.
+    if (!/^\/api\/v2\/ams\/[a-z0-9_]+$/.test(path)) {
+      return res.status(400).json({ error: 'Parameter "path" hanya boleh endpoint AMS, contoh /api/v2/ams/get_shop_performance' });
+    }
 
     const data = await shopee.shopeeRequest({
       method: 'GET',
@@ -388,7 +394,8 @@ router.post('/shops', async (req, res) => {
          token_expire_at = COALESCE(EXCLUDED.token_expire_at, shops.token_expire_at),
          status = 'active',
          updated_at = NOW()`,
-      [shop_id, shop_name || null, region || 'ID', access_token || null, refresh_token || null, expireAt]
+      [shop_id, shop_name || null, region || 'ID',
+       encryptToken(access_token || null), encryptToken(refresh_token || null), expireAt]
     );
 
     res.json({ success: true, shop_id });
