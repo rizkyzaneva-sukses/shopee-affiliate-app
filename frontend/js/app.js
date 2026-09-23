@@ -803,6 +803,19 @@ async function deleteGoal(id) {
 async function checkAlerts() {
   const res = await apiPost('/api/alerts/check');
   const el = document.getElementById('alertBanner');
+  if (el && res?.error) {
+    // Don't render a failed check as "no alerts".
+    el.classList.remove('hidden');
+    el.innerHTML = `
+      <div class="flex items-start gap-3 p-3 rounded-lg border bg-red-500/10 border-red-500/30 text-red-300 mb-2">
+        <i class="fas fa-times-circle mt-0.5"></i>
+        <div class="flex-1">
+          <p class="font-medium text-sm">Cek alert gagal</p>
+          <p class="text-xs opacity-80">${esc(res.error)}</p>
+        </div>
+      </div>`;
+    return;
+  }
   if (!el || !res?.alerts?.length) {
     if (el) el.classList.add('hidden');
     return;

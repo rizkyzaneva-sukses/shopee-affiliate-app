@@ -15,6 +15,15 @@ const INTERVAL_MS = 60 * 60 * 1000; // tiap 1 jam
 // access token never lapses between runs.
 const BUFFER_MS = INTERVAL_MS + 15 * 60 * 1000;
 const STARTUP_DELAY_MS = 15 * 1000;
+const SYNC_LOG_RETENTION_DAYS = 90;
+
+async function pruneSyncLogs() {
+  const { rowCount } = await query(
+    `DELETE FROM sync_logs WHERE created_at < NOW() - make_interval(days => $1)`,
+    [SYNC_LOG_RETENTION_DAYS]
+  );
+  if (rowCount) console.log(`[CLEANUP] ${rowCount} sync log lama dihapus`);
+}
 
 async function refreshAll() {
   // 'expired' shops are retried too: if the failure was transient they heal
@@ -53,7 +62,9 @@ function startTokenScheduler() {
   const run = () => refreshAll()
     .catch((e) => console.error('[TOKEN] Scheduler error:', e.message))
     .then(() => daily.prefillAll())
-    .catch((e) => console.error('[DAILY] Prefill error:', e.message));
+    .catch((e) => console.error('[DAILY] Prefill error:', e.message))
+    .then(() => pruneSyncLogs())
+    .catch((e) => console.error('[CLEANUP] Prune sync_logs error:', e.message));
   setTimeout(run, STARTUP_DELAY_MS);
   setInterval(run, INTERVAL_MS);
   console.log('[TOKEN] Auto-refresh token + data harian aktif (tiap 1 jam)');

@@ -12,8 +12,9 @@ function num(v) {
 
 /**
  * SQL for the rows of each shop's most recent sync of one period + channel.
- * affiliate_performance keeps every past date range (each resync adds one),
- * so summing the raw table double counts, and taking the newest row per
+ * A resync can store a new date range before the old one is pruned, and
+ * old databases may still hold past ranges, so summing the raw table double
+ * counts, and taking the newest row per
  * affiliate would keep stale numbers for affiliates absent from the last sync.
  * Every sync writes one date range per shop, so match on that range.
  * Params: $1 period_type, $2 channel.
@@ -312,6 +313,15 @@ async function syncShopAffiliates(shop, periodType, channelRaw) {
        num(a.total_buyers), num(a.new_buyers)]
     );
   }
+
+  // Only the newest range is ever read (LATEST_SNAPSHOT_SQL); drop the older
+  // ones so the table doesn't grow with every resync.
+  await query(
+    `DELETE FROM affiliate_performance
+     WHERE shop_id = $1 AND period_type = $2 AND channel = $3
+       AND (start_date IS DISTINCT FROM $4::date OR end_date IS DISTINCT FROM $5::date)`,
+    [shop.shop_id, periodType, channel, startDate, endDate]
+  );
 
   await query(`UPDATE shops SET last_sync_at = NOW() WHERE shop_id = $1`, [shop.shop_id]);
   return list.length;
@@ -959,8 +969,7 @@ router.get('/alerts', async (req, res) => {
     );
     res.json({ data: rows });
   } catch (e) {
-    // If table doesn't exist, return empty
-    res.json({ data: [] });
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -1033,18 +1042,27 @@ router.post('/alerts/check', async (_req, res) => {
       });
     }
 
-    // Store alerts
+    // One row per alert kind: refresh the ones still firing, retire the rest.
     for (const a of alerts) {
       await query(
-        `INSERT INTO alerts (type, title, message, active) VALUES ($1, $2, $3, true)`,
-        [a.type, a.title, a.message]
-      ).catch(() => {});
+        `INSERT INTO alerts (alert_key, type, title, message, active) VALUES ($1, $2, $1, $3, true)
+         ON CONFLICT (alert_key) DO UPDATE SET
+           type = EXCLUDED.type, message = EXCLUDED.message, active = true,
+           created_at = CASE WHEN alerts.active THEN alerts.created_at ELSE NOW() END,
+           updated_at = NOW()`,
+        [a.title, a.type, a.message]
+      );
     }
+    await query(
+      `UPDATE alerts SET active = false, updated_at = NOW()
+       WHERE active AND NOT (alert_key = ANY($1::text[]))`,
+      [alerts.map((a) => a.title)]
+    );
 
     res.json({ alerts, checked_at: new Date().toISOString() });
   } catch (e) {
-    // If alerts table doesn't exist, just return empty
-    res.json({ alerts: [], checked_at: new Date().toISOString() });
+    console.error('[ALERTS] Check gagal:', e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
