@@ -32,13 +32,22 @@ const LATEST_SNAPSHOT_SQL = `
   WHERE ap.period_type = $1 AND ap.channel = $2
 `;
 
-async function latestSnapshotTotals(period, { shopId, channel = 'AllChannel' } = {}) {
-  const params = [period, channel];
-  let filter = '';
+/**
+ * WHERE condition for a shop filter. "all" means active shops only, matching
+ * resolveShops() — an expired shop's last snapshot can be months old and
+ * would otherwise inflate the totals while the trend chart leaves it out.
+ */
+function shopScope(params, shopId, col = 'shop_id') {
   if (shopId && shopId !== 'all') {
     params.push(shopId);
-    filter = `WHERE shop_id = $${params.length}`;
+    return `${col} = $${params.length}`;
   }
+  return `${col} IN (SELECT shop_id FROM shops WHERE status = 'active')`;
+}
+
+async function latestSnapshotTotals(period, { shopId, channel = 'AllChannel' } = {}) {
+  const params = [period, channel];
+  const filter = `WHERE ${shopScope(params, shopId)}`;
   const { rows } = await query(`
     SELECT
       COALESCE(SUM(gmv), 0) AS gmv,
@@ -485,11 +494,8 @@ router.get('/affiliates', async (req, res) => {
       FROM (${LATEST_SNAPSHOT_SQL}) p
       JOIN affiliates a ON a.affiliate_id = p.affiliate_id AND a.shop_id = p.shop_id
       LEFT JOIN shops s ON s.shop_id = p.shop_id
+      WHERE ${shopScope(params, shopId, 'p.shop_id')}
     `;
-    if (shopId && shopId !== 'all') {
-      params.push(shopId);
-      sql += ` WHERE p.shop_id = $${params.length}`;
-    }
 
     const { rows } = await query(sql, params);
     const list = rows.map(r => ({
@@ -563,6 +569,18 @@ router.get('/goals', async (req, res) => {
     const { rows } = await query(
       `SELECT * FROM goals WHERE active = true ORDER BY created_at DESC`
     );
+
+    // Progress over each goal's own period (all active shops), not whatever
+    // period the dashboard happens to show.
+    if ((process.env.APP_MODE || 'mock') === 'live' && rows.length) {
+      const shops = await resolveShops('all');
+      const byPeriod = {};
+      for (const period of new Set(rows.map((g) => g.period || 'Month'))) {
+        const series = await daily.dailySeries(shops, period);
+        byPeriod[period] = { ...sumDaily(series), pending: series.pending.length > 0 };
+      }
+      for (const g of rows) g.current = byPeriod[g.period || 'Month'];
+    }
     res.json({ data: rows });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -882,6 +900,19 @@ router.get('/transactions', async (req, res) => {
   }
 });
 
+/**
+ * Totals from the daily rows (same source as the trend chart), ending on
+ * Shopee's latest data date. `lastDays` limits the sum to the newest N days.
+ */
+function sumDaily({ days, rows }, lastDays) {
+  return (lastDays ? days.slice(-lastDays) : days).reduce((t, d) => {
+    const r = rows[d] || {};
+    t.gmv += r.sales || 0; t.orders += r.orders || 0;
+    t.commission += r.commission || 0; t.clicks += r.clicks || 0;
+    return t;
+  }, { gmv: 0, orders: 0, commission: 0, clicks: 0 });
+}
+
 // ---------- Period Comparison ----------
 router.get('/dashboard/compare', async (req, res) => {
   try {
@@ -889,15 +920,8 @@ router.get('/dashboard/compare', async (req, res) => {
     
     let results;
     if ((process.env.APP_MODE || 'mock') === 'live') {
-      // Both windows from the same daily rows, ending on Shopee's latest data date.
-      const { days, rows } = await daily.dailySeries(await resolveShops(shopId), 'Last30d');
-      const sumDays = (list) => list.reduce((t, d) => {
-        const r = rows[d] || {};
-        t.gmv += r.sales || 0; t.orders += r.orders || 0;
-        t.commission += r.commission || 0; t.clicks += r.clicks || 0;
-        return t;
-      }, { gmv: 0, orders: 0, commission: 0, clicks: 0 });
-      results = { Last7d: sumDays(days.slice(-7)), Last30d: sumDays(days) };
+      const series = await daily.dailySeries(await resolveShops(shopId), 'Last30d');
+      results = { Last7d: sumDaily(series, 7), Last30d: sumDaily(series) };
     } else {
       results = {
         Last7d: await latestSnapshotTotals('Last7d', { shopId }),
@@ -968,6 +992,13 @@ function generateInsight(r7ext, r30) {
   return insights;
 }
 
+function formatRupiahShort(n) {
+  n = Number(n) || 0;
+  if (n >= 1e9) return 'Rp ' + (n / 1e9).toFixed(1).replace('.', ',') + 'M';
+  if (n >= 1e6) return 'Rp ' + (n / 1e6).toFixed(1).replace('.', ',') + 'jt';
+  return 'Rp ' + Math.round(n).toLocaleString('id-ID');
+}
+
 // ---------- Alerts (anomaly detection) ----------
 router.get('/alerts', async (req, res) => {
   try {
@@ -982,26 +1013,24 @@ router.get('/alerts', async (req, res) => {
 
 router.post('/alerts/check', async (_req, res) => {
   try {
-    // Check for anomalies: affiliates with 0 orders in last 30d but had orders before
-    const { rows: dropped } = await query(`
-      SELECT a.name, a.username, a.shop_id,
-             COALESCE(p.gmv, 0) AS current_gmv,
-             COALESCE(p.orders, 0) AS current_orders
-      FROM affiliates a
-      LEFT JOIN LATERAL (
-        SELECT * FROM affiliate_performance ap
-        WHERE ap.affiliate_id = a.affiliate_id AND ap.shop_id = a.shop_id
-          AND ap.period_type = 'Last30d'
-        ORDER BY ap.synced_at DESC LIMIT 1
-      ) p ON true
-      WHERE COALESCE(p.orders, 0) = 0 AND COALESCE(p.gmv, 0) = 0
-        AND a.status = 'active'
-      LIMIT 10
-    `);
+    // Affiliates of active shops with no order and no GMV in their latest 30-day sync.
+    const idleParams = ['Last30d', 'AllChannel'];
+    const { rows: [{ idle }] } = await query(`
+      SELECT COUNT(*)::int AS idle FROM (${LATEST_SNAPSHOT_SQL}) p
+      WHERE ${shopScope(idleParams, 'all', 'p.shop_id')} AND p.orders = 0 AND p.gmv = 0
+    `, idleParams);
 
-    // GMV/commission drop: Last7d extrapolated to 30 days vs Last30d.
-    const t30 = await latestSnapshotTotals('Last30d');
-    const t7 = await latestSnapshotTotals('Last7d');
+    // GMV/commission drop: last 7 days extrapolated to 30 vs the last 30 days,
+    // from the daily rows — synced Last7d snapshots can be weeks old.
+    let t30 = { gmv: 0, commission: 0 };
+    let t7 = { gmv: 0, commission: 0 };
+    if ((process.env.APP_MODE || 'mock') === 'live') {
+      const series = await daily.dailySeries(await resolveShops('all'), 'Last30d');
+      if (!series.pending.length) {
+        t30 = sumDaily(series);
+        t7 = sumDaily(series, 7);
+      }
+    }
 
     const alerts = [];
 
@@ -1028,11 +1057,11 @@ router.post('/alerts/check', async (_req, res) => {
       });
     }
 
-    if (dropped.length > 0) {
+    if (idle > 0) {
       alerts.push({
         type: 'info',
         title: 'Afiliator Tidak Aktif',
-        message: `${dropped.length} afiliator tidak punya order/GMV di periode ini`,
+        message: `${idle} afiliator tidak punya order/GMV dalam 30 hari terakhir`,
         created_at: new Date().toISOString()
       });
     }
@@ -1095,12 +1124,9 @@ router.get('/export/csv', async (req, res) => {
       FROM (${LATEST_SNAPSHOT_SQL}) p
       JOIN affiliates a ON a.affiliate_id = p.affiliate_id AND a.shop_id = p.shop_id
       LEFT JOIN shops s ON s.shop_id = p.shop_id
+      WHERE ${shopScope(params, shopId, 'p.shop_id')}
+      ORDER BY p.gmv DESC NULLS LAST
     `;
-    if (shopId && shopId !== 'all') {
-      params.push(shopId);
-      sql += ` WHERE p.shop_id = $${params.length}`;
-    }
-    sql += ` ORDER BY p.gmv DESC NULLS LAST`;
 
     const { rows } = await query(sql, params);
 

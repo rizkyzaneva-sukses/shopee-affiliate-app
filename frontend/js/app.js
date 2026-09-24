@@ -677,6 +677,8 @@ function renderChart() {
 }
 
 // ---------- Goal Tracker ----------
+const GOAL_PERIOD_LABEL = { Month: 'Bulan Ini', Last30d: '30 Hari', Last7d: '7 Hari' };
+
 function renderGoals() {
   const el = document.getElementById('goalList');
   if (!el) return;
@@ -691,10 +693,10 @@ function renderGoals() {
     return;
   }
 
-  // Calculate current progress from the full affiliate totals
-  const { gmv: currentGmv, orders: currentOrders, commission: currentCommission } = getTotals();
-
   el.innerHTML = state.goals.map(g => {
+    // Server sends progress over the goal's own period (live mode); the
+    // dashboard totals are only a fallback and may cover another period.
+    const { gmv: currentGmv, orders: currentOrders, commission: currentCommission } = g.current || getTotals();
     const gmvPct = Math.min(100, (currentGmv / g.target_gmv) * 100);
     const orderPct = g.target_orders > 0 ? Math.min(100, (currentOrders / g.target_orders) * 100) : 0;
     const commPct = g.target_commission > 0 ? Math.min(100, (currentCommission / g.target_commission) * 100) : 0;
@@ -704,9 +706,9 @@ function renderGoals() {
     return `
       <div class="bg-slate-900/50 rounded-lg p-3">
         <div class="flex items-center justify-between mb-2">
-          <p class="font-medium text-sm text-slate-100">${esc(g.name)}</p>
+          <p class="font-medium text-sm text-slate-100">${esc(g.name)}${g.current?.pending ? ' <span class="text-[10px] text-slate-500">(data harian masih dimuat)</span>' : ''}</p>
           <div class="flex items-center gap-1">
-            <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">${esc(g.period || 'Month')}</span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">${esc(GOAL_PERIOD_LABEL[g.period] || g.period || 'Bulan Ini')}</span>
             <button class="text-slate-600 hover:text-red-400 text-xs" onclick="deleteGoal(${g.id})"><i class="fas fa-trash"></i></button>
           </div>
         </div>
@@ -911,6 +913,15 @@ async function runCalculator() {
   document.getElementById('calcOrdersGap').textContent = formatNumber(res.gap.orders) + ' order';
   document.getElementById('calcGmvGap').textContent = formatRupiah(res.gap.gmv);
   document.getElementById('calcCommTarget').textContent = formatRupiah(res.target.commission);
+}
+
+/** Toast for /api/sync/all: failed shops first, otherwise the synced count. */
+function notifySyncResult(res, emptyMsg) {
+  const failed = (res?.shops || []).filter(r => r.error);
+  if (res?.error) showToast(res.error, 'info');
+  else if (failed.length) showToast('Sync gagal: ' + failed.map(r => `${r.name || r.shop_id} (${r.error})`).join(', '), 'info');
+  else if (res?.total > 0) showToast(`Synced ${res.total} afiliator dari ${res.shops.length} toko`, 'success');
+  else if (emptyMsg) showToast(emptyMsg, 'info');
 }
 
 /** Per-shop failures from multi-shop endpoints, or a whole-request error. */
@@ -1232,13 +1243,8 @@ async function syncAllShops() {
   state.syncing = false;
   if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sync-alt"></i> Sync Semua'; }
 
-  if (res?.error) {
-    showToast(res.error, 'info');
-  } else {
-    const total = res?.total || 0;
-    showToast(`Synced ${total} afiliator dari ${res?.shops?.length || 0} toko`, 'success');
-    await Promise.all([loadAffiliates(), loadCampaigns(), loadShops(), loadTrend()]);
-  }
+  notifySyncResult(res, res?.message || 'Tidak ada afiliator yang tersinkron');
+  if (!res?.error) await Promise.all([loadAffiliates(), loadCampaigns(), loadShops(), loadTrend()]);
 }
 
 async function discoverShops() {
@@ -1277,11 +1283,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const channelText = e.target.options[e.target.selectedIndex].text;
     showToast('Sync data untuk channel ' + channelText + '...', 'info');
     const syncRes = await apiPost('/api/sync/all', { period: state.period, channel: e.target.value });
-    if (syncRes?.total > 0) {
-      showToast(`Synced ${syncRes.total} afiliator`, 'success');
-    } else if (e.target.value !== 'all') {
-      showToast('Tidak ada data untuk channel ini di Shopee AMS', 'info');
-    }
+    notifySyncResult(syncRes, e.target.value !== 'all' ? 'Tidak ada data untuk channel ini di Shopee AMS' : '');
     await Promise.all([loadAffiliates(), loadTrend(), loadGoals()]);
   });
   document.getElementById('periodSelect')?.addEventListener('change', async (e) => {
@@ -1289,9 +1291,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Auto-sync all shops for the new period, then reload
     showToast('Sync data untuk periode ' + e.target.options[e.target.selectedIndex].text + '...', 'info');
     const syncRes = await apiPost('/api/sync/all', { period: state.period, channel: state.channel });
-    if (syncRes?.total > 0) {
-      showToast(`Synced ${syncRes.total} afiliator`, 'success');
-    }
+    notifySyncResult(syncRes);
     await Promise.all([loadAffiliates(), loadTrend(), loadGoals()]);
   });
   // Debounced: in live mode every search hits the Shopee API.
